@@ -2,6 +2,26 @@
 
 This ZIP is an implementation contract for building a local browser AI agent for **Google Chrome and Microsoft Edge**.
 
+## Run the implementation
+
+The specification pack lives in this subfolder. The frontend and backend are independent applications one level above it, at the repository root.
+
+```powershell
+# Terminal 1
+cd ..\backend
+npm install
+npm run dev
+
+# Terminal 2
+cd ..\frontend
+npm install
+npm run dev
+```
+
+Then open `chrome://extensions` or `edge://extensions`, enable Developer mode, and load the repository's `frontend/dist` folder unpacked. Open an ordinary HTTP(S) page and click the extension icon. The first task on a site asks for Chrome/Edge site access, and medium/high-risk actions are held for approval.
+
+The default local model is the installed `qwen2.5:7b`. Runtime endpoints and model defaults can be changed with the variables documented in `../backend/.env.example`.
+
 The intended product is a browser extension with a ChatGPT/Claude-style side panel. A user can ask things such as:
 
 ```text

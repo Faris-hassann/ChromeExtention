@@ -4,11 +4,11 @@
   "entrypoint": "Agent.md",
   "purpose": "Build a local-first Chrome/Edge browser agent with a ChatGPT/Claude-style side panel, Express/TypeScript local backend, Ollama/Qwen orchestration, typed browser tools, continuous browser observation, and no database or persisted task/chat history.",
   "implementation_targets": {
-    "frontend": "frontend/ - React + TypeScript + Vite + Manifest V3 browser extension",
-    "backend": "backend/ - Express + TypeScript local service",
+    "frontend": "../frontend/ - React + TypeScript + Vite + Manifest V3 browser extension",
+    "backend": "../backend/ - Express + TypeScript local service",
     "development": [
-      "cd frontend && npm install && npm run dev",
-      "cd backend && npm install && npm run dev"
+      "cd ../frontend && npm install && npm run dev",
+      "cd ../backend && npm install && npm run dev"
     ]
   },
   "non_negotiables": [
@@ -28,7 +28,7 @@
     "Executable contract tests may not be skipped, deleted, or converted to todo"
   ],
   "spec_root": "md",
-  "contract_root": "contracts",
-  "test_contract_root": "tests",
+  "contract_root": "../contracts",
+  "test_contract_root": "../tests",
   "reference_behavior": "Claude-like observe -> reason -> act -> automatically observe -> validate -> continue; do not claim implementation parity with proprietary Claude internals."
 }
