@@ -1,0 +1,34 @@
+{
+  "pack": "Local Browser Agent - Codex Claude Build Pack",
+  "version": "1.0.0",
+  "entrypoint": "Agent.md",
+  "purpose": "Build a local-first Chrome/Edge browser agent with a ChatGPT/Claude-style side panel, Express/TypeScript local backend, Ollama/Qwen orchestration, typed browser tools, continuous browser observation, and no database or persisted task/chat history.",
+  "implementation_targets": {
+    "frontend": "frontend/ - React + TypeScript + Vite + Manifest V3 browser extension",
+    "backend": "backend/ - Express + TypeScript local service",
+    "development": [
+      "cd frontend && npm install && npm run dev",
+      "cd backend && npm install && npm run dev"
+    ]
+  },
+  "non_negotiables": [
+    "Chrome and Microsoft Edge support",
+    "Side panel chat interface",
+    "Ollama is the only enabled provider in V1, behind an LLM provider abstraction",
+    "Main Qwen model plus optional/automatic separate local vision-capable model",
+    "Typed browser tools only; LLM cannot execute arbitrary JavaScript/Playwright code",
+    "Fresh browser observation is mandatory after every meaningful action before another meaningful action",
+    "Browser driver abstraction contains ExtensionBrowserDriver and PlaywrightBrowserDriver",
+    "HTTP/WebSocket transport in MVP; Native Messaging architecture reserved for Phase 2",
+    "No database",
+    "No persisted chat history, task history, screenshots, extracted page data, or LLM responses",
+    "Minimal settings/site permissions may use chrome.storage.local",
+    "Future provider secrets use OS-secure storage",
+    "Both frontend and backend must support npm run dev",
+    "Executable contract tests may not be skipped, deleted, or converted to todo"
+  ],
+  "spec_root": "md",
+  "contract_root": "contracts",
+  "test_contract_root": "tests",
+  "reference_behavior": "Claude-like observe -> reason -> act -> automatically observe -> validate -> continue; do not claim implementation parity with proprietary Claude internals."
+}
