@@ -31,8 +31,6 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Local environment and secrets (keep documented examples)
-.env
-.env.*
 !.env.example
 !**/.env.example
 

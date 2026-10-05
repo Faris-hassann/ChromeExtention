@@ -2,6 +2,8 @@
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 export type BrowserToolName =
+  | 'capture_text'
+  | 'paste_text'
   | 'observe_page'
   | 'read_page'
   | 'inspect_element'
