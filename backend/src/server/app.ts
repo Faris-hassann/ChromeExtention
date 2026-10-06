@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { AgentOrchestrator } from '../agent/orchestrator.js';
 import { OllamaProvider } from '../llm/ollama.js';
 import { FallbackProvider } from '../llm/provider.js';
+import { openRouterStatus } from '../llm/openrouter-status.js';
 import type { BrowserObservation, Envelope } from '../types.js';
 import { describeError, log, type LogLevel } from '../logger.js';
 
@@ -23,7 +24,11 @@ export function createApp() {
   app.use(cors({ origin: (origin, callback) => callback(null, !origin || origin.startsWith('chrome-extension://') || origin.startsWith('edge-extension://') || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) }));
   app.get('/health', async (_req, res) => { const status = await ollama.health(); res.status(200).json({ backend: 'healthy', address: `${config.host}:${config.port}`, websocket: 'available', llmProvider: config.llmProvider, primaryModel: config.openrouterModel, openrouterConfigured: !!config.openrouterApiKey, fallbackAvailable: status.reachable, ollama: status.reachable ? 'reachable' : 'unavailable', models: status.models.map(m => m.name), guidance: status.reachable ? undefined : `Start Ollama at ${config.ollamaUrl}` }); });
   app.get('/api/models', async (_req, res) => { const status = await ollama.health(); res.status(status.reachable ? 200 : 503).json(status); });
-  app.get('/api/settings/runtime', (_req, res) => res.json({ llmProvider: config.llmProvider, openrouterModel: config.openrouterModel, openrouterConfigured: !!config.openrouterApiKey, openrouterTimeoutMs: config.openrouterTimeoutMs, ollamaUrl: config.ollamaUrl, mainModel: config.mainModel, visionModel: config.visionModel, maxSteps: config.maxSteps, recoveryLimit: config.recoveryLimit, llmTimeoutMs: config.llmTimeoutMs, llmAttemptTimeoutMs: config.llmAttemptTimeoutMs, ollamaKeepAlive: config.ollamaKeepAlive, ollamaNumCtx: config.ollamaNumCtx, ollamaNumPredict: config.ollamaNumPredict }));
+  app.get('/api/providers/openrouter/status', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await openRouterStatus.status(req.query.refresh === 'true'));
+  });
+  app.get('/api/settings/runtime', (_req, res) => res.json({ llmProvider: config.llmProvider, openrouterModel: config.openrouterModel, openrouterConfigured: !!config.openrouterApiKey, openrouterTimeoutMs: config.openrouterTimeoutMs, openrouterCooldownMs: config.openrouterCooldownMs, openrouterMaxTokens: config.openrouterMaxTokens, ollamaUrl: config.ollamaUrl, mainModel: config.mainModel, visionModel: config.visionModel, maxSteps: config.maxSteps, recoveryLimit: config.recoveryLimit, llmTimeoutMs: config.llmTimeoutMs, llmAttemptTimeoutMs: config.llmAttemptTimeoutMs, ollamaKeepAlive: config.ollamaKeepAlive, ollamaNumCtx: config.ollamaNumCtx, ollamaNumPredict: config.ollamaNumPredict }));
   app.post('/api/diagnostics/events', (req, res) => {
     if (Buffer.byteLength(JSON.stringify(req.body ?? null)) > 128 * 1024) return res.status(413).json({ error: 'Diagnostic batch exceeds 128 KiB', stage: 'http.diagnostics.size' });
     const parsed = diagnosticBatchSchema.safeParse(req.body);

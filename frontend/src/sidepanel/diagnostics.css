@@ -51,3 +51,13 @@
 .diagnostic-entry.error { border-left: 3px solid #d25454; background: #fff7f7; }
 .diagnostic-entry pre { margin: 6px 0 0; max-height: 130px; }
 .diagnostics > p { padding: 0 11px 10px; color: #777; }
+
+.provider-progress { display: grid; gap: 4px; padding: 10px 16px; border-bottom: 1px solid #d8d8d2; background: #f1f4fa; font-size: 12px; overflow-wrap: anywhere; }
+.provider-progress strong { font-size: 11px; }
+.provider-progress small { color: #71736d; }
+.provider-progress.failed { background: #fff0f0; border-color: #f1caca; }
+.provider-progress.fallback,.provider-progress.skipped { background: #fff6e5; }
+.provider-progress.succeeded { background: #eef8ef; }
+.activity-time { display: block; font-size: 10px; color: #777; margin-bottom: 3px; }
+.message.user .activity-time { color: #ccc; }
+.statusbar { min-height: 34px; height: auto; padding-top: 6px; padding-bottom: 6px; flex-wrap: wrap; text-transform: none; }

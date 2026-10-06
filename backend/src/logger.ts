@@ -8,6 +8,7 @@ const weights: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error
 const sensitiveKey = /password|token|secret|cookie|authorization|apiKey|capturedText|pageText|prompt|content|semanticContent|screenshotRef|value|^title$|^text$|^summary$|^question$/i;
 
 function diagnosticField(key: string, value: unknown, depth: number): unknown {
+  if (/^(promptEvalCount|promptEvalCachedCount|promptEvalDurationMs)$/.test(key) && typeof value === 'number') return value;
   if (sensitiveKey.test(key)) return '[REDACTED]';
   if (/url$|^site$/i.test(key) && typeof value === 'string') {
     try { return new URL(value).origin; } catch { return '[REDACTED_URL]'; }

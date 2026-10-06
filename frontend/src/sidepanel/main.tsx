@@ -10,7 +10,9 @@ import './styles.css';
 import './diagnostics.css';
 import './automation.css';
 
-type Activity = { id: string; kind: 'user' | 'agent' | 'system' | 'error'; text: string; detail?: unknown };
+type ProviderProgress = { provider: 'openrouter' | 'ollama'; phase: string; model: string; message: string; elapsedMs?: number; step?: number; code?: string; status?: number };
+type OpenRouterStatus = { configured: boolean; credentialValidity: string; availability: string; quota?: { used: number; limit: number; remaining: number }; reason: string; checkedAt: string; nextRetryAt?: string };
+type Activity = { id: string; timestamp?: string; kind: 'user' | 'agent' | 'system' | 'error'; text: string; detail?: unknown };
 type Approval = { site: string; risk: string; actionSummary: string; arguments?: unknown; toolCallId?: string };
 type ActiveSite = { origin: string; hostname: string } | { error: string };
 type DiagnosticLog = { id: string; timestamp: string; level: 'debug' | 'info' | 'warn' | 'error'; source: 'sidepanel' | 'background' | 'backend'; event: string; details?: unknown };
@@ -73,10 +75,13 @@ function App() {
   const boundTabRef = useRef<number | undefined>(undefined);
   const [workerReady, setWorkerReady] = useState(false);
   const [providerLabel, setProviderLabel] = useState('Checking model');
+  const [providerProgress, setProviderProgress] = useState<ProviderProgress>();
+  const [cloudStatus, setCloudStatus] = useState<OpenRouterStatus>();
+  const [refreshingCloud, setRefreshingCloud] = useState(false);
   const [activities, setActivities] = useState<Activity[]>([{ id: crypto.randomUUID(), kind: 'agent', text: 'I’m ready. Tell me what you want to do in your browser.' }]); const [approval, setApproval] = useState<Approval>();
   const [screenshot, setScreenshot] = useState<string>(); const [showShot, setShowShot] = useState(false); const wsRef = useRef<WebSocket | undefined>(undefined); const taskRef = useRef<string | undefined>(undefined);
   const diagnosticQueueRef = useRef<PersistedDiagnostic[]>([]); const backendUrlRef = useRef(defaults.backendUrl);
-  const add = useCallback((kind: Activity['kind'], text: string, detail?: unknown) => setActivities(list => [...list, { id: crypto.randomUUID(), kind, text, detail }]), []);
+  const add = useCallback((kind: Activity['kind'], text: string, detail?: unknown) => setActivities(list => [...list, { id: crypto.randomUUID(), timestamp: new Date().toISOString(), kind, text, detail }]), []);
   const log = useCallback((level: DiagnosticLog['level'], source: DiagnosticLog['source'], event: string, details?: unknown) => {
     const entry = { id: crypto.randomUUID(), timestamp: new Date().toISOString(), level, source, event, details: safeDiagnostic(details) } satisfies DiagnosticLog;
     setDiagnostics(list => [...list.slice(-499), entry]);
@@ -88,6 +93,18 @@ function App() {
   const reportError = useCallback((stage: string, error: unknown, details?: unknown) => { const diagnostic = { stage, ...errorDetails(error), context: details }; log('error', 'sidepanel', stage, diagnostic); add('error', `${stage}: ${diagnostic.message}`, diagnostic); }, [add, log]);
   const sendWs = useCallback((message: Envelope) => { const socket = wsRef.current; if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('WebSocket is not open'); log('debug', 'sidepanel', `WebSocket send: ${message.event}`, { taskId: message.taskId, toolCallId: message.toolCallId, payload: responseSummary(message.payload) }); socket.send(JSON.stringify(message)); }, [log]);
   const requestBackground = useCallback(async (stage: string, message: Record<string, unknown>) => { log('debug', 'sidepanel', `Background request: ${stage}`, message); const response = await chrome.runtime.sendMessage(message); if (!response) throw new Error('Background worker returned no response'); if (response.ok === false && (message.type !== 'EXECUTE' || !response.code || response.code === 'SITE_ACCESS_REQUIRED')) throw new BackgroundRequestError(response, response.stage ?? stage); log(response.ok === false ? 'warn' : 'debug', 'background', `${stage} ${response.ok === false ? 'needs recovery' : 'succeeded'}`, responseSummary(response)); return response; }, [log]);
+  const refreshCloud = useCallback(async (force = false) => {
+    setRefreshingCloud(true);
+    try {
+      const response = await fetch(`${settings.backendUrl}/api/providers/openrouter/status${force ? '?refresh=true' : ''}`, { signal: AbortSignal.timeout(7000) });
+      if (!response.ok) throw new Error('Status unavailable');
+      const status = await response.json();
+      if (!['available', 'unavailable', 'unknown'].includes(status.availability)) throw new Error('Invalid status');
+      setCloudStatus(status); log('info', 'backend', 'OpenRouter availability checked', status);
+    } catch { setCloudStatus({ configured: false, credentialValidity: 'unknown', availability: 'unknown', reason: 'OpenRouter status is unavailable. Check the backend connection.', checkedAt: new Date().toISOString() }); }
+    finally { setRefreshingCloud(false); }
+  }, [settings.backendUrl, log]);
+  useEffect(() => { void refreshCloud(); const timer = window.setInterval(() => void refreshCloud(), 60000); return () => window.clearInterval(timer); }, [refreshCloud]);
   useEffect(() => { loadSettings().then(setSettings); }, []);
   useEffect(() => { backendUrlRef.current = settings.backendUrl; }, [settings.backendUrl]);
   useEffect(() => { const timer = window.setInterval(() => void flushDiagnosticQueue(diagnosticQueueRef.current, backendUrlRef.current), 2000); return () => { window.clearInterval(timer); void flushDiagnosticQueue(diagnosticQueueRef.current, backendUrlRef.current); }; }, []);
@@ -137,14 +154,25 @@ function App() {
     async function handle(msg: Envelope) {
       if (msg.taskId && msg.taskId !== taskRef.current) return;
       if (msg.event === 'server.task_state' && msg.taskId === taskRef.current) { setTaskState(msg.payload.state); if (['PAUSED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(msg.payload.state)) { if (msg.payload.state !== 'PAUSED') setPendingSiteAccess(undefined); void chrome.runtime.sendMessage({ type: 'CLEANUP_INPUT', tabId: boundTabRef.current }); } }
+      if (msg.event === 'server.provider_progress') {
+        const progress = msg.payload as ProviderProgress;
+        setProviderProgress(progress);
+        const provider = progress.provider === 'openrouter' ? 'OpenRouter' : 'Local Qwen';
+        setProviderLabel(`${provider} · ${progress.model} · ${progress.phase}`);
+        if (progress.provider === 'openrouter' && ['failed', 'skipped', 'succeeded'].includes(progress.phase)) void refreshCloud();
+        if (progress.phase !== 'waiting') {
+          log(progress.phase === 'failed' || progress.phase === 'fallback' ? 'warn' : 'info', 'backend', `${provider}: ${progress.phase}`, progress);
+          if (progress.phase !== 'model_selected') add(progress.phase === 'failed' ? 'error' : 'agent', `${progress.message}${progress.elapsedMs !== undefined ? ` (${(progress.elapsedMs / 1000).toFixed(1)}s)` : ''}`, progress);
+        }
+      }
       if (msg.event === 'server.activity' && msg.payload.message !== 'Connected to local agent.') add('agent', msg.payload.message, msg.payload.detail);
       if (msg.event === 'server.error') { log('error', 'backend', msg.payload.stage ?? 'Backend error', msg.payload); add('error', msg.payload.message, msg.payload); }
       if (msg.event === 'server.approval_request') setApproval({ ...msg.payload, toolCallId: msg.toolCallId });
       await handleActionRequest(msg);
     }
-  }, [add, handleActionRequest, log, reportError, settings.backendUrl]);
+  }, [add, handleActionRequest, log, reportError, settings.backendUrl, refreshCloud]);
   useEffect(() => { const url = `${settings.backendUrl}/health`; log('debug', 'sidepanel', 'Backend health check started', { url }); fetch(url).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(`Health endpoint returned HTTP ${response.status}`); setOllama(data.ollama === 'reachable' ? 'reachable' : 'unavailable'); setModels(data.models ?? []); log('info', 'backend', 'Backend health check completed', data); }).catch(error => { setOllama('unavailable'); reportError('Backend health check', error, { url }); }); }, [log, reportError, settings.backendUrl]);
-  const send = async () => { const text = goal.trim(); if (!text || connection !== 'connected' || !workerReady) return; if ('error' in activeSite) { reportError('Site access preflight', new Error(activeSite.error)); return; } try { log('info', 'sidepanel', 'Site permission requested', { origin: activeSite.origin }); const granted = await chrome.permissions.contains({ origins: [activeSite.origin] }); log(granted ? 'info' : 'warn', 'sidepanel', 'Site permission result', { origin: activeSite.origin, granted }); if (!granted) { add('error', `Access to ${activeSite.hostname} was not granted. Allow site access in Chrome and try again.`); return; } add('user', text); setGoal(''); log('info', 'sidepanel', 'Creating agent task', { goalLength: text.length, activeOrigin: activeSite.origin }); const response = await fetch(`${settings.backendUrl}/api/agent/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal: text, approvalMode: settings.approvalMode }) }); const task = await response.json(); if (!response.ok) throw new Error(task.error ?? `Task creation returned HTTP ${response.status}`); log('info', 'backend', 'Agent task created', { taskId: task.id, state: task.state }); if (taskRef.current) { sendWs({ event: 'client.user_control', taskId: taskRef.current, payload: { action: 'stop' } }); await chrome.runtime.sendMessage({ type: 'CLEANUP_INPUT', tabId: boundTabRef.current }).catch(() => undefined); } setPendingSiteAccess(undefined); setApproval(undefined); taskRef.current = task.id; boundTabRef.current = (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id; setTaskId(task.id); setTaskState(task.state); await handleActionRequest({ event: 'server.action_request', taskId: task.id, payload: { tool: 'observe_page', arguments: {} } }); } catch (error) { reportError('Starting task', error, { activeOrigin: activeSite.origin }); } };
+  const send = async () => { const text = goal.trim(); if (!text || connection !== 'connected' || !workerReady) return; if ('error' in activeSite) { reportError('Site access preflight', new Error(activeSite.error)); return; } try { log('info', 'sidepanel', 'Site permission requested', { origin: activeSite.origin }); const granted = await chrome.permissions.contains({ origins: [activeSite.origin] }); log(granted ? 'info' : 'warn', 'sidepanel', 'Site permission result', { origin: activeSite.origin, granted }); if (!granted) { add('error', `Access to ${activeSite.hostname} was not granted. Allow site access in Chrome and try again.`); return; } add('user', text); setGoal(''); log('info', 'sidepanel', 'Creating agent task', { goalLength: text.length, activeOrigin: activeSite.origin }); const response = await fetch(`${settings.backendUrl}/api/agent/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal: text, approvalMode: settings.approvalMode }) }); const task = await response.json(); if (!response.ok) throw new Error(task.error ?? `Task creation returned HTTP ${response.status}`); log('info', 'backend', 'Agent task created', { taskId: task.id, state: task.state }); if (taskRef.current) { sendWs({ event: 'client.user_control', taskId: taskRef.current, payload: { action: 'stop' } }); await chrome.runtime.sendMessage({ type: 'CLEANUP_INPUT', tabId: boundTabRef.current }).catch(() => undefined); } setProviderProgress(undefined); setPendingSiteAccess(undefined); setApproval(undefined); taskRef.current = task.id; boundTabRef.current = (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id; setTaskId(task.id); setTaskState(task.state); await handleActionRequest({ event: 'server.action_request', taskId: task.id, payload: { tool: 'observe_page', arguments: {} } }); } catch (error) { reportError('Starting task', error, { activeOrigin: activeSite.origin }); } };
   const control = async (action: string) => {
     if (!taskId) return;
     if (['pause', 'stop', 'take_control'].includes(action)) await chrome.runtime.sendMessage({ type: 'CLEANUP_INPUT', tabId: boundTabRef.current }).catch(() => undefined);
@@ -193,9 +221,11 @@ function App() {
   const statusText = useMemo(() => taskState.replaceAll('_', ' ').toLowerCase(), [taskState]);
   return <main className="shell">
     <header><div className="brand"><span className="mark">L</span><div><strong>Local Agent</strong><small>{providerLabel}</small></div></div><button className="icon" onClick={() => setShowSettings(!showSettings)} aria-label="Settings">⚙</button></header>
-    <section className="statusbar"><span className={`dot ${connection}`}/><span>{connection}</span><span className="divider"/><span className={`dot ${ollama}`}/><span>{providerLabel}</span>{taskId && <><span className="divider"/><span>{statusText}</span></>}</section>
+    <section className="statusbar"><span className={`dot ${connection}`}/><span>{connection}</span><span className="divider"/><span className={`dot ${providerProgress ? providerProgress.phase === 'failed' ? 'unavailable' : providerProgress.phase === 'succeeded' ? 'reachable' : 'checking' : ollama}`}/><span>{providerLabel}</span>{taskId && <><span className="divider"/><span>{statusText}</span></>}</section>
     {showSettings ? <SettingsPanel settings={settings} models={models} onSave={async s => { await saveSettings(s); setSettings(s); setShowSettings(false); }} /> : <>
-      <section className="conversation">{activities.map(item => <article key={item.id} className={`message ${item.kind}`}><div>{item.text}</div>{item.detail != null && <details><summary>Technical details</summary><pre>{JSON.stringify(item.detail, null, 2)}</pre></details>}</article>)}
+      <section className={`provider-progress ${cloudStatus?.availability === 'unavailable' ? 'fallback' : ''}`} aria-label="OpenRouter availability"><strong>OpenRouter: {cloudStatus?.availability ?? 'checking'}</strong>{cloudStatus && <><span>API key: {cloudStatus.credentialValidity} · {cloudStatus.reason}</span>{cloudStatus.quota && <small>Free requests today: {cloudStatus.quota.used}/{cloudStatus.quota.limit} used; {cloudStatus.quota.remaining} remaining.</small>}{cloudStatus.nextRetryAt && <small>Next retry: {new Date(cloudStatus.nextRetryAt).toLocaleString()}</small>}</>}<button onClick={() => void refreshCloud(true)} disabled={refreshingCloud}>Refresh OpenRouter status</button></section>
+      {providerProgress && <section className={`provider-progress ${providerProgress.phase}`} aria-live="polite"><strong>{providerProgress.provider === 'openrouter' ? 'OpenRouter' : 'Local Qwen'} · {providerProgress.model}</strong><span>{providerProgress.message}</span><small>{providerProgress.step ? `Step ${providerProgress.step} · ` : ''}{providerProgress.phase}{providerProgress.elapsedMs !== undefined ? ` · ${(providerProgress.elapsedMs / 1000).toFixed(1)}s` : ''}</small></section>}
+      <section className="conversation">{activities.map(item => <article key={item.id} className={`message ${item.kind}`}>{item.timestamp && <time className="activity-time">{new Date(item.timestamp).toLocaleTimeString()}</time>}<div>{item.text}</div>{item.detail != null && <details><summary>Technical details</summary><pre>{JSON.stringify(item.detail, null, 2)}</pre></details>}</article>)}
         {approval && <article className="approval"><div className="risk">{approval.risk} RISK · APPROVAL NEEDED</div><h3>{approval.actionSummary}</h3><p>{approval.site}</p>{approval.arguments != null && <pre>{JSON.stringify(approval.arguments, null, 2)}</pre>}<div className="row"><button className="primary" onClick={() => control('approve')}>Approve once</button><button onClick={() => control('deny')}>Deny</button></div></article>}
         {screenshot && <section className="shot"><button onClick={() => setShowShot(!showShot)}>Latest screenshot {showShot ? '▴' : '▾'}</button>{showShot && <img src={screenshot} alt="Latest ephemeral browser screenshot"/>}</section>}
         {pendingSiteAccess && <article className="site-access"><div className="risk">SITE ACCESS NEEDED</div><h3>Continue on {pendingSiteAccess.hostname}</h3><p>The page redirected to a different site. Grant access to this site only so the current task can continue.</p><code>{pendingSiteAccess.origin}</code><div className="row"><button className="primary" onClick={grantPendingSiteAccess}>Grant access &amp; continue</button><button onClick={denyPendingSiteAccess}>Pause task</button></div></article>}
@@ -215,7 +245,7 @@ function DiagnosticPanel({ logs, onClear }: { logs: DiagnosticLog[]; onClear: ()
     catch { setCopyLabel('Copy failed'); }
     window.setTimeout(() => setCopyLabel('Copy logs'), 1500);
   };
-  return <details className="diagnostics">
+  return <details className="diagnostics" open>
     <summary>Diagnostics ({logs.length})</summary>
     <div className="diagnostic-actions"><button onClick={copy} disabled={!logs.length}>{copyLabel}</button><button onClick={onClear} disabled={!logs.length}>Clear</button></div>
     {!logs.length ? <p>No diagnostic events yet.</p> : <div className="diagnostic-list">{[...logs].reverse().map(item => <article key={item.id} className={`diagnostic-entry ${item.level}`}><time>{new Date(item.timestamp).toLocaleTimeString()}</time><strong>{item.source} · {item.event}</strong>{item.details !== undefined && <pre>{JSON.stringify(item.details, null, 2)}</pre>}</article>)}</div>}

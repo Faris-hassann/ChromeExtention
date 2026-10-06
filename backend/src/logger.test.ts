@@ -8,6 +8,9 @@ const created: string[] = [];
 afterEach(async () => { await Promise.all(created.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
 describe('diagnostic logging', () => {
+  it('retains numeric prompt timing metrics while redacting prompt content', () => {
+    expect(sanitizeLogData({ promptEvalCount: 120, promptEvalDurationMs: 3500, prompt: 'private task' })).toEqual({ promptEvalCount: 120, promptEvalDurationMs: 3500, prompt: '[REDACTED]' });
+  });
   it('keeps only origins and excludes titles and extracted text from diagnostics', () => {
     expect(sanitizeLogData({ url: 'https://www.google.com/search?q=private-answer', title: 'private prompt', text: 'private answer' })).toEqual({ url: 'https://www.google.com', title: '[REDACTED]', text: '[REDACTED]' });
   });

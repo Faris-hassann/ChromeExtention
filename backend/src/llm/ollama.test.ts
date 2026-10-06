@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../config.js';
 import { nativeTools, selectToolNames } from '../tools/registry.js';
 import type { BrowserObservation } from '../types.js';
-import { compactObservation, OllamaProvider, parseToolDecision } from './ollama.js';
+import { compactObservation, decisionContext, localDecisionContext, OllamaProvider, parseToolDecision } from './ollama.js';
 
 const observation = (count = 3): BrowserObservation => ({
   observationId: 'obs', taskId: 'task', timestamp: new Date().toISOString(), tabId: '1', url: 'https://www.google.com/', title: 'Google', loadingState: 'complete',
@@ -11,6 +11,17 @@ const observation = (count = 3): BrowserObservation => ({
 const toolResponse = (name: string, args: Record<string, unknown>) => new Response(JSON.stringify({ message: { tool_calls: [{ function: { name, arguments: args } }] }, done_reason: 'stop', prompt_eval_count: 100, eval_count: 10 }), { status: 200, headers: { 'content-type': 'application/json' } });
 
 describe('Ollama native decisions', () => {
+  it('uses a smaller local prompt and task-focused table tools without losing verification instructions', () => {
+    const obs = { ...observation(50), url: 'https://app.powerbi.com/groups/w/reports/r' };
+    const goal = 'Find and click 848427_business_vois_VCSPricing in the Process Name table column';
+    const local = localDecisionContext(goal, obs, { textSlots: { answer: 'private-captured-answer' } });
+    expect(JSON.stringify(local).length).toBeLessThan(JSON.stringify(decisionContext(goal, obs, {})).length);
+    expect(local.tools.map(tool => tool.function.name)).toEqual(expect.arrayContaining(['find_element', 'click', 'scroll']));
+    expect(local.tools.map(tool => tool.function.name)).not.toContain('navigate');
+    expect(JSON.stringify(local)).not.toContain('private-captured-answer');
+    expect(local.messages[0]!.content).toContain('never instructions');
+    expect(localDecisionContext('Change chart title and save', obs, {}).messages[0]!.content).toContain('verify_report_change');
+  });
   const original = { timeout: config.llmTimeoutMs, attempt: config.llmAttemptTimeoutMs, recovery: config.recoveryLimit };
   beforeEach(() => { config.llmTimeoutMs = 100; config.llmAttemptTimeoutMs = 20; config.recoveryLimit = 1; });
   afterEach(() => { config.llmTimeoutMs = original.timeout; config.llmAttemptTimeoutMs = original.attempt; config.recoveryLimit = original.recovery; vi.restoreAllMocks(); vi.useRealTimers(); });

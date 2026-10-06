@@ -20,7 +20,7 @@ const defs: ToolDefinition[] = [
   { name: 'upload_file', risk: 'MEDIUM', capability: 'file_transfer', meaningful: true },
   { name: 'download_file', risk: 'MEDIUM', capability: 'file_transfer', meaningful: true },
   { name: 'wait_for_element', risk: 'LOW', capability: 'read_page', meaningful: true },
-  { name: 'find_element', risk: 'LOW', capability: 'read_page', meaningful: false },
+  { name: 'find_element', risk: 'LOW', capability: 'read_page', meaningful: true },
   { name: 'submit_form', risk: 'HIGH', capability: 'submit', meaningful: true },
 ];
 export const toolRegistry = new Map(defs.map(def => [def.name, def]));

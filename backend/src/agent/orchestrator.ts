@@ -5,10 +5,11 @@ import { PolicyEngine } from '../permissions/policy.js';
 import { toolRegistry, validateTool } from '../tools/registry.js';
 import type { BrowserObservation, Envelope, TaskState, ToolRequest } from '../types.js';
 import { describeError, log } from '../logger.js';
-import { recordTableInteraction, tableCompletionError } from './table-interaction.js';
+import { actionDescription, observedChanges } from './activity.js';
+import { recordTableInteraction, tableCompletionError, tableFollowup } from './table-interaction.js';
 import { observeReportSave, recordReportAction, reportCompletionError } from './powerbi.js';
 
-export interface AgentTask { id: string; goal: string; approvalMode?: 'manual' | 'auto' | 'always'; state: TaskState; step: number; observationFresh: boolean; observation?: BrowserObservation; lastActionResult?: unknown; memory: Record<string, unknown>; pending?: ToolRequest; pendingApproval?: ToolRequest; abort?: AbortController }
+export interface AgentTask { id: string; goal: string; approvalMode?: 'manual' | 'auto' | 'always'; state: TaskState; step: number; observationFresh: boolean; observation?: BrowserObservation; lastActionResult?: unknown; memory: Record<string, unknown>; pending?: ToolRequest; pendingApproval?: ToolRequest; abort?: AbortController; pendingChanges?: { before: BrowserObservation; label: string }; actionStartedAt?: number }
 type Emit = (message: Envelope) => void;
 
 export class AgentOrchestrator {
@@ -24,6 +25,11 @@ export class AgentOrchestrator {
     const task = this.require(taskId);
     if (['CANCELLED', 'COMPLETED', 'FAILED'].includes(task.state)) return;
     log('info', 'task.observation.received', { taskId, observationId: observation.observationId, url: observation.url, title: observation.title, loadingState: observation.loadingState, interactiveElementCount: observation.interactiveElements?.length ?? 0, step: task.step });
+    if (task.pendingChanges) {
+      const changes = observedChanges(task.pendingChanges.before, observation);
+      this.emit({ event: 'server.activity', taskId, payload: { message: `After ${task.pendingChanges.label}: ${changes.length ? changes.join('; ') + '.' : 'no visible page change detected yet.'}`, detail: { changes, stage: 'observation' } } });
+      task.pendingChanges = undefined;
+    }
     task.observation = { ...observation, lastActionResult: observation.lastActionResult ?? task.lastActionResult };
     observeReportSave(task.memory, task.observation);
     task.lastActionResult = undefined; task.observationFresh = true; task.pending = undefined;
@@ -51,6 +57,14 @@ export class AgentOrchestrator {
         }
       }
     }
+    const result = payload as { ok?: boolean; error?: string; matchCount?: number; code?: string };
+    if (current.pending) {
+      const label = actionDescription(current.pending, current.observation);
+      const durationMs = current.actionStartedAt ? Math.round(performance.now() - current.actionStartedAt) : undefined;
+      const detail = { stage: 'action', tool: current.pending.tool, ok: result.ok === true, durationMs, code: result.code, matchCount: result.matchCount };
+      this.emit({ event: 'server.activity', taskId, payload: { message: `${label}: ${result.ok === true ? 'succeeded' : 'failed'}${result.matchCount !== undefined ? `; ${result.matchCount} matching cells` : ''}${durationMs !== undefined ? ` (${(durationMs / 1000).toFixed(1)}s)` : ''}.${result.ok === false && result.error ? ' ' + result.error : ''}`, detail } });
+      if (result.ok && current.observation && !['find_element', 'wait_for_element'].includes(current.pending.tool)) current.pendingChanges = { before: current.observation, label };
+    }
     const task = this.require(taskId); log('info', 'task.action.result', { taskId, step: task.step, pendingTool: task.pending?.tool, result: payload }); task.lastActionResult = payload; task.observationFresh = false; task.pending = undefined; this.state(task, 'WAITING_FOR_PAGE');
     this.emit({ event: 'server.activity', taskId, payload: { message: 'Checking what changed…', detail: payload } });
     this.emit({ event: 'server.action_request', taskId, payload: { tool: 'observe_page', arguments: {} } });
@@ -59,7 +73,7 @@ export class AgentOrchestrator {
     const task = this.require(taskId);
     if (['CANCELLED', 'COMPLETED', 'FAILED'].includes(task.state)) return;
     log('info', 'task.control.received', { taskId, action, state: task.state, pendingTool: task.pendingApproval?.tool });
-    if (action === 'stop') { task.abort?.abort(); task.memory = {}; task.pending = undefined; task.pendingApproval = undefined; return this.state(task, 'CANCELLED'); }
+    if (action === 'stop') { task.abort?.abort(); task.pendingChanges = undefined; task.memory = {}; task.pending = undefined; task.pendingApproval = undefined; return this.state(task, 'CANCELLED'); }
     if (action === 'pause' || action === 'take_control') { task.abort?.abort(); return this.state(task, 'PAUSED'); }
     if (action === 'deny') { task.pendingApproval = undefined; return this.state(task, 'PAUSED'); }
     if (action === 'resume') { this.state(task, 'WAITING_FOR_PAGE'); this.emit({ event: 'server.action_request', taskId, payload: { tool: 'observe_page', arguments: {} } }); return; }
@@ -72,7 +86,12 @@ export class AgentOrchestrator {
     this.state(task, task.step === 0 ? 'PLANNING' : 'RUNNING'); task.abort = new AbortController();
     log('info', 'task.planning.started', { taskId: task.id, step: task.step, url: task.observation.url });
     try {
-      const decision = await this.llm.decide(task.goal, task.observation, task.memory, task.abort.signal);
+      const followup = tableFollowup(task.goal, task.memory, task.observation);
+      if (followup) this.emit({ event: 'server.activity', taskId: task.id, payload: { message: 'Browser follow-up: using the exact table match and click evidence; no extra model request needed.' } });
+      const decision = followup ?? await this.llm.decide(task.goal, task.observation, task.memory, task.abort.signal, progress => {
+        if (task.abort?.signal.aborted || ['PAUSED', 'CANCELLED', 'COMPLETED', 'FAILED'].includes(task.state)) return;
+        this.emit({ event: 'server.provider_progress', taskId: task.id, payload: { ...progress, step: task.step + 1 } });
+      });
       if (task.abort.signal.aborted) return;
       log('info', 'task.planning.decision', { taskId: task.id, step: task.step, type: decision.type, tool: decision.type === 'tool_request' ? decision.tool : undefined, argumentKeys: decision.type === 'tool_request' ? Object.keys(decision.arguments ?? {}) : [] });
       if (decision.type === 'user_input_required') { this.state(task, 'PAUSED'); this.emit({ event: 'server.activity', taskId: task.id, payload: { message: decision.question } }); return; }
@@ -115,12 +134,13 @@ export class AgentOrchestrator {
       request = { ...request, arguments: { ...request.arguments, value: text } };
     }
     const def = toolRegistry.get(request.tool)!;
+    task.actionStartedAt = performance.now();
     task.pending = request; task.step += def.meaningful ? 1 : 0;
     if (def.meaningful) task.observationFresh = false;
     log('info', 'task.action.dispatched', { taskId: task.id, step: task.step, stepId: request.stepId, toolCallId: request.toolCallId, tool: request.tool, argumentKeys: Object.keys(request.arguments) });
     this.state(task, 'RUNNING'); this.emit({ event: 'server.action_request', taskId: task.id, stepId: request.stepId, toolCallId: request.toolCallId, payload: { tool: request.tool, arguments: request.arguments } });
   }
   private require(id: string) { const task = this.tasks.get(id); if (!task) throw new Error('Task not found'); return task; }
-  private state(task: AgentTask, state: TaskState) { const previousState = task.state; task.state = state; if (['FAILED', 'COMPLETED', 'CANCELLED'].includes(state)) { task.memory = {}; task.observation = undefined; task.lastActionResult = undefined; task.pending = undefined; task.pendingApproval = undefined; } log('info', 'task.state.changed', { taskId: task.id, previousState, state, step: task.step }); this.emit({ event: 'server.task_state', taskId: task.id, payload: { state, step: task.step } }); }
+  private state(task: AgentTask, state: TaskState) { const previousState = task.state; task.state = state; if (['FAILED', 'COMPLETED', 'CANCELLED'].includes(state)) { task.pendingChanges = undefined; task.memory = {}; task.observation = undefined; task.lastActionResult = undefined; task.pending = undefined; task.pendingApproval = undefined; } log('info', 'task.state.changed', { taskId: task.id, previousState, state, step: task.step }); this.emit({ event: 'server.task_state', taskId: task.id, payload: { state, step: task.step } }); }
 }
 const redact = (args: Record<string, unknown>) => Object.fromEntries(Object.entries(args).map(([key, value]) => /password|token|secret|cookie/i.test(key) ? [key, '[REDACTED]'] : [key, value]));
