@@ -9,6 +9,13 @@ export interface SemanticElement {
   checked?: boolean;
   selected?: boolean;
   frameId?: string;
+  documentId?: string;
+  priority?: number;
+  columnName?: string;
+  rowText?: string;
+  rowIndex?: number;
+  tableName?: string;
+  searchMatch?: boolean;
 }
 
 export interface BrowserObservation {
@@ -19,6 +26,8 @@ export interface BrowserObservation {
   url: string;
   title: string;
   loadingState: 'loading' | 'interactive' | 'complete' | 'unknown';
+  documentId?: string;
+  powerBi?: { selectedVisualId?: string; saving?: boolean; mode: 'edit' | 'read' | 'unknown'; saveControlId?: string; saveDisabled?: boolean; saveMessages: string[] };
   focusedElementId?: string;
   interactiveElements: SemanticElement[];
   semanticContent?: string;

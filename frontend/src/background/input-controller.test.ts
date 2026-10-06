@@ -73,4 +73,20 @@ describe('browser-level input controller', () => {
     vi.mocked(chrome.debugger.attach).mockRejectedValue(new Error('Another debugger is already attached'));
     await expect(controller().run(7, 'click', { elementId: 'el_001' })).rejects.toThrow(/Close DevTools or another debugger/);
   });
+
+  it('cancels a pending pane scroll when the user takes control', async () => {
+    let finish!: (value: any) => void;
+    vi.mocked(chrome.scripting.executeScript).mockImplementation(async ({ func }: any) => {
+      if (func.name === 'resolveInputTarget') return new Promise(resolve => { finish = resolve; });
+      return [{ result: undefined }];
+    });
+    const input = controller();
+    const pending = input.run(7, 'scroll', { elementId: 'el_001', direction: 'down' });
+    const assertion = expect(pending).rejects.toThrow(/cancelled/);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await input.cleanup(7);
+    finish([{ result: { ok: true, x: 120, y: 80 } }]);
+    await assertion;
+    expect(commands.some(command => command.params.type === 'mouseWheel')).toBe(false);
+  });
 });

@@ -36,7 +36,7 @@ describe('browser interactions in real Chromium', () => {
       expect(withOverlay.semanticContent).toContain('Visible page text');
       expect(withOverlay.interactiveElements.some(e => e.name?.includes('cursor'))).toBe(false);
       await page.evaluate(() => { const cover = document.createElement('div'); cover.style.cssText = 'position:fixed;inset:0;z-index:2147483645;background:white'; document.body.appendChild(cover); });
-      expect(await page.evaluate(`(${resolveInputTarget.toString()})(${JSON.stringify(target.elementId)})`)).toMatchObject({ ok: false, code: 'TARGET_OBSTRUCTED' });
+      expect(await page.evaluate(`(${resolveInputTarget.toString()})(${JSON.stringify(withOverlay.interactiveElements.find(e => e.name === 'Shadow action')!.elementId)})`)).toMatchObject({ ok: false, code: 'TARGET_OBSTRUCTED' });
     } finally { await page.close(); }
   });
   it('identifies the latest answer in layouts with response controls rather than author attributes', async () => {

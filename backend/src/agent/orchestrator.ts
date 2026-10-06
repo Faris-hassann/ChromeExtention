@@ -5,6 +5,8 @@ import { PolicyEngine } from '../permissions/policy.js';
 import { toolRegistry, validateTool } from '../tools/registry.js';
 import type { BrowserObservation, Envelope, TaskState, ToolRequest } from '../types.js';
 import { describeError, log } from '../logger.js';
+import { recordTableInteraction, tableCompletionError } from './table-interaction.js';
+import { observeReportSave, recordReportAction, reportCompletionError } from './powerbi.js';
 
 export interface AgentTask { id: string; goal: string; approvalMode?: 'manual' | 'auto' | 'always'; state: TaskState; step: number; observationFresh: boolean; observation?: BrowserObservation; lastActionResult?: unknown; memory: Record<string, unknown>; pending?: ToolRequest; pendingApproval?: ToolRequest; abort?: AbortController }
 type Emit = (message: Envelope) => void;
@@ -23,12 +25,15 @@ export class AgentOrchestrator {
     if (['CANCELLED', 'COMPLETED', 'FAILED'].includes(task.state)) return;
     log('info', 'task.observation.received', { taskId, observationId: observation.observationId, url: observation.url, title: observation.title, loadingState: observation.loadingState, interactiveElementCount: observation.interactiveElements?.length ?? 0, step: task.step });
     task.observation = { ...observation, lastActionResult: observation.lastActionResult ?? task.lastActionResult };
+    observeReportSave(task.memory, task.observation);
     task.lastActionResult = undefined; task.observationFresh = true; task.pending = undefined;
     if (task.state === 'WAITING_FOR_PAGE' || task.state === 'RUNNING' || task.state === 'PLANNING') await this.advance(task);
   }
   actionResult(taskId: string, payload: unknown) {
     const current = this.require(taskId);
     if (['CANCELLED', 'COMPLETED', 'FAILED'].includes(current.state)) return;
+    if (current.pending && current.observation) recordTableInteraction(current.memory, current.observation, current.pending, payload);
+    if (current.pending && current.observation) payload = recordReportAction(current.memory, current.observation, current.pending, payload, current.step);
     if ((payload as { ok?: boolean })?.ok && current.pending) {
       const recent = (current.memory.recentActions ??= []) as Array<Record<string, unknown>>;
       recent.push({ tool: current.pending.tool, url: current.pending.arguments.url, elementId: current.pending.arguments.elementId, key: current.pending.arguments.key });
@@ -72,6 +77,13 @@ export class AgentOrchestrator {
       log('info', 'task.planning.decision', { taskId: task.id, step: task.step, type: decision.type, tool: decision.type === 'tool_request' ? decision.tool : undefined, argumentKeys: decision.type === 'tool_request' ? Object.keys(decision.arguments ?? {}) : [] });
       if (decision.type === 'user_input_required') { this.state(task, 'PAUSED'); this.emit({ event: 'server.activity', taskId: task.id, payload: { message: decision.question } }); return; }
       if (decision.type === 'complete_request') {
+        const reportError = tableCompletionError(task.goal, task.memory, task.observation) ?? reportCompletionError(task.goal, task.memory, task.observation);
+        if (reportError) {
+          task.lastActionResult = { ok: false, code: 'REPORT_NOT_VERIFIED', error: reportError };
+          this.state(task, 'PAUSED');
+          this.emit({ event: 'server.activity', taskId: task.id, payload: { message: reportError + ' Resume to continue.' } });
+          return;
+        }
         const slots = task.memory.textSlots as Record<string, string> | undefined;
         if ((slots || /capture_text|paste_text|copy.*answer|answer.*google/i.test(task.goal)) && /google/i.test(task.goal) && /search/i.test(task.goal)) {
           const url = new URL(task.observation.url);

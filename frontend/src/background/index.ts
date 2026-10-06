@@ -1,8 +1,10 @@
-import { collectPage, executeInPage } from './collector';
+import { collectPage, executeInPage, verifyReportChange } from './collector';
 import type { Observation } from '../shared/types';
 import { checkSiteAccess, siteAccessRequired, type SiteAccessRequired } from '../shared/site-access';
 import { BUILD_VERSION } from '../shared/build-version';
 import { InputController } from './input-controller';
+import { collectFrames, FrameRegistry, scriptTarget } from './frames';
+import type { TableSearch } from './table-targets';
 
 function diagnostic(level: 'debug' | 'info' | 'warn' | 'error', event: string, details?: unknown) {
   const entry = { timestamp: new Date().toISOString(), level, source: 'background', event, details };
@@ -14,8 +16,11 @@ function diagnostic(level: 'debug' | 'info' | 'warn' | 'error', event: string, d
 chrome.runtime.onInstalled.addListener(() => chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }));
 chrome.action.onClicked.addListener(tab => { if (tab.windowId) chrome.sidePanel.open({ windowId: tab.windowId }); });
 const input = new InputController();
+const frameRegistry = new FrameRegistry();
+const tableSearches = new Map<number, { taskId: string; query: TableSearch }>();
+const observedTasks = new Map<number, string>();
 chrome.debugger.onDetach.addListener(source => input.markDetached(source.tabId));
-chrome.tabs.onRemoved.addListener(tabId => { void input.cleanup(tabId); });
+chrome.tabs.onRemoved.addListener(tabId => { frameRegistry.forget(tabId); tableSearches.delete(tabId); observedTasks.delete(tabId); void input.cleanup(tabId); });
 
 let previousSummary = '';
 async function activeTab(tabId?: number) { if (tabId) return chrome.tabs.get(tabId); const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('No active browser tab'); return tab; }
@@ -38,15 +43,19 @@ async function observe(taskId: string, tabId?: number): Promise<Observation | Si
   if (!tab.url?.startsWith('http')) throw new Error('This page cannot be automated. Open an http(s) website.');
   const accessRequired = await checkSiteAccess(tab.url, containsOrigin);
   if (accessRequired) return accessRequired;
-  let result: ReturnType<typeof collectPage> | undefined;
+  observedTasks.set(tab.id!, taskId);
+  if (tableSearches.get(tab.id!)?.taskId !== taskId) tableSearches.delete(tab.id!);
+  let result: ReturnType<typeof collectPage> | Awaited<ReturnType<typeof collectFrames>> | undefined;
   try {
-    [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: collectPage });
+    if (chrome.webNavigation !== undefined) result = await collectFrames(tab.id!, tableSearches.get(tab.id!)?.query);
+    else [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: collectPage });
   } catch (error) {
     const redirected = await redirectedAccessRequired(error, tab.id);
     if (redirected) return redirected;
     throw error;
   }
   if (!result) throw new Error('The page observation returned no data');
+  frameRegistry.remember(tab.id!, result.interactiveElements);
   const summary = JSON.stringify({ url: result.url, title: result.title, elements: result.interactiveElements.length, text: result.semanticContent.slice(0, 500) });
   const observation: Observation = { ...result, observationId: crypto.randomUUID(), taskId, timestamp: new Date().toISOString(), tabId: String(tab.id), diff: previousSummary && previousSummary !== summary ? { changed: true } : { changed: false } };
   previousSummary = summary; return observation;
@@ -78,22 +87,37 @@ async function runTool(tool: string, args: Record<string, any>, tabId?: number, 
   if (tool === 'take_screenshot') { return { ok: true, screenshotRef: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 65 }) }; }
   const accessRequired = await checkSiteAccess(tab.url, containsOrigin);
   if (accessRequired) return accessRequired;
+  try { args = frameRegistry.route(tab.id!, args); } catch (error) { return { ok: false, code: 'STALE_ELEMENT', error: String(error) }; }
   if (tool === 'wait_for_element') {
     await new Promise(resolve => setTimeout(resolve, Math.min(5000, Math.max(100, Number(args.timeoutMs ?? 1000)))));
     if (args.elementId) {
-      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: (id: string) => !!document.querySelector(`[data-local-agent-id="${CSS.escape(id)}"]`), args: [String(args.elementId)] });
+      const [{ result }] = await chrome.scripting.executeScript({ target: scriptTarget(tab.id!, args), func: (id: string) => !!document.querySelector(`[data-local-agent-id="${CSS.escape(id)}"]`), args: [String(args.elementId)] });
       return result ? { ok: true } : { ok: false, code: 'ELEMENT_NOT_FOUND', error: 'Waited for the element; observe again.' };
     }
     return { ok: true, waited: true };
   }
-  if (tool === 'observe_page' || tool.startsWith('read_') || tool === 'find_element') return { ok: true };
-  if (args.frameId) return { ok: false, code: 'UNSUPPORTED_FRAME', error: 'Browser-level input currently supports only the top-level page and open shadow DOM.' };
+  if (tool === 'find_element') {
+    const query: TableSearch = { text: String(args.text ?? ''), column: args.column, exact: args.exact !== false, occurrence: Number(args.occurrence ?? 1) };
+    if (!query.text.trim()) return { ok: false, code: 'INVALID_SEARCH', error: 'Provide the exact table value to find.' };
+    tableSearches.set(tab.id!, { taskId: observedTasks.get(tab.id!) ?? '', query });
+    const result = await collectFrames(tab.id!, query);
+    frameRegistry.remember(tab.id!, result.interactiveElements);
+    const matches = result.interactiveElements.filter(el => 'searchMatch' in el && el.searchMatch);
+    return { ok: matches.length >= query.occurrence!, code: matches.length >= query.occurrence! ? undefined : 'ELEMENT_NOT_FOUND', matchCount: matches.length, search: query, error: matches.length >= query.occurrence! ? undefined : 'No matching rendered cell in this column. Scroll the table pane using its observed grid element, then find again. Use the report filter pane if appropriate; the global search box does not search table rows.' };
+  }
+  if (tool === 'observe_page' || tool.startsWith('read_')) return { ok: true };
+  if (tool === 'verify_report_change') {
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({ target: scriptTarget(tab.id!, args), func: verifyReportChange, args: [String(args.elementId), args.documentToken] });
+      return result;
+    } catch { return { ok: false, code: 'STALE_DOCUMENT', error: 'The report frame changed or became inaccessible; observe again.' }; }
+  }
   if (input.handles(tool)) {
     try { return await input.run(tab.id!, tool, args, visibleCursor); }
-    catch (error) { const message = error instanceof Error ? error.message : String(error); return { ok: false, code: /cancelled/i.test(message) ? 'INPUT_CANCELLED' : 'INPUT_UNAVAILABLE', error: message, retryable: !/cancelled/i.test(message) }; }
+    catch (error) { const message = error instanceof Error ? error.message : String(error); return { ok: false, code: /cancelled/i.test(message) ? 'INPUT_CANCELLED' : /frame|document|context|target/i.test(message) ? 'STALE_DOCUMENT' : 'INPUT_UNAVAILABLE', error: message, retryable: !/cancelled/i.test(message) }; }
   }
   try {
-    const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: executeInPage, args: [tool, args] }); return result;
+    const [{ result }] = await chrome.scripting.executeScript({ target: scriptTarget(tab.id!, args), func: executeInPage, args: [tool, { ...args, documentId: args.documentToken }] }); return result;
   } catch (error) {
     const redirected = await redirectedAccessRequired(error, tab.id);
     if (redirected) return redirected;

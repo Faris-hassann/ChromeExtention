@@ -1,7 +1,9 @@
 import { z } from 'zod';
+import { isPowerBi, isReportEditGoal } from '../agent/powerbi.js';
 import type { BrowserObservation, ToolDefinition, ToolName } from '../types.js';
 
 const defs: ToolDefinition[] = [
+  { name: 'verify_report_change', risk: 'LOW', capability: 'read_page', meaningful: true },
   { name: 'capture_text', risk: 'LOW', capability: 'extract_data', meaningful: true },
   { name: 'paste_text', risk: 'MEDIUM', capability: 'interact', meaningful: true },
   { name: 'observe_page', risk: 'LOW', capability: 'read_page', meaningful: false },
@@ -23,9 +25,12 @@ const defs: ToolDefinition[] = [
 ];
 export const toolRegistry = new Map(defs.map(def => [def.name, def]));
 
-const elementArgs = z.object({ elementId: z.string().startsWith('el_') }).passthrough();
+const routingArgs = { frameId: z.string().regex(/^\d+$/).optional(), documentId: z.string().optional() };
+const elementArgs = z.object({ elementId: z.string().startsWith('el_'), ...routingArgs }).passthrough();
 export const toolSchemas: Partial<Record<ToolName, z.ZodType>> = {
-  wait_for_element: z.object({ elementId: z.string().startsWith('el_').optional(), timeoutMs: z.number().min(100).max(5000).optional() }).strict(),
+  find_element: z.object({ text: z.string().trim().min(1).max(500), column: z.string().trim().min(1).optional(), exact: z.boolean().optional(), occurrence: z.number().int().min(1).max(100).optional() }).strict(),
+  verify_report_change: elementArgs.extend({ property: z.enum(['chartType', 'title', 'color']), expectedValue: z.string().min(1) }).strict(),
+  wait_for_element: z.object({ ...routingArgs, elementId: z.string().startsWith('el_').optional(), timeoutMs: z.number().min(100).max(5000).optional() }).strict(),
   capture_text: elementArgs.extend({ key: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict(),
   paste_text: elementArgs.extend({ key: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict(),
   navigate: z.object({ url: z.string().url() }).strict(), open_tab: z.object({ url: z.string().url().optional() }).strict(),
@@ -33,7 +38,7 @@ export const toolSchemas: Partial<Record<ToolName, z.ZodType>> = {
   clear: elementArgs, focus: elementArgs, hover: elementArgs, check: elementArgs, uncheck: elementArgs,
   select_option: elementArgs.extend({ value: z.string() }), press_key: z.object({ key: z.string().min(1) }).passthrough(),
   switch_tab: z.object({ tabId: z.union([z.string(), z.number()]) }), close_tab: z.object({ tabId: z.union([z.string(), z.number()]).optional() }),
-  scroll: z.object({ direction: z.enum(['up', 'down']), amount: z.number().optional() }).strict(), submit_form: elementArgs,
+  scroll: z.object({ ...routingArgs, elementId: z.string().startsWith('el_').optional(), direction: z.enum(['up', 'down']), amount: z.number().optional() }).strict(), submit_form: elementArgs,
 };
 export function validateTool(name: ToolName, args: unknown): Record<string, unknown> {
   if (!toolRegistry.has(name)) throw new Error(`Unknown tool: ${name}`);
@@ -43,8 +48,10 @@ export const exposedToolCatalog = defs.map(({ name, risk, capability }) => ({ na
 
 export type NativeTool = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
 const emptyParameters = { type: 'object', properties: {}, additionalProperties: false };
-const elementParameters = { type: 'object', properties: { elementId: { type: 'string', description: 'Element ID from the latest observation' } }, required: ['elementId'], additionalProperties: false };
+const elementParameters = { type: 'object', properties: { elementId: { type: 'string', description: 'Element ID from the latest observation' }, frameId: { type: 'string' }, documentId: { type: 'string' } }, required: ['elementId'], additionalProperties: false };
 const descriptions: Partial<Record<ToolName, string>> = {
+  find_element: 'Find a rendered table cell by text and optional column heading. Exact text matching is the default. For Process Name use the full identifier and column Process Name. The next observation prioritizes matching cells with fresh IDs; click that observed cell. occurrence defaults to 1, the first matching row. If not found, scroll the observed table grid and retry. This does not use the global website search.',
+  verify_report_change: 'Read an actual Power BI editor setting after changing it. property is chartType, title, or color. expectedValue must be the requested setting as displayed in the editor (for colours use its hex value). Use a labelled title/colour input or a selected chart-type option. Verify each requested property before saving.',
   wait_for_element: 'Wait briefly before a fresh observation, especially while an answer is generating. Optionally wait for an observed element to appear.',
   capture_text: 'Capture the full text of an observed element in task memory using a key. Wait until generation finishes before capturing the latest answer.',
   paste_text: 'Paste exact text from an existing task memory key into an observed textbox, without rewriting it.',
@@ -54,6 +61,8 @@ const descriptions: Partial<Record<ToolName, string>> = {
 };
 
 function parametersFor(name: ToolName): Record<string, unknown> {
+  if (name === 'find_element') return { type: 'object', properties: { text: { type: 'string' }, column: { type: 'string' }, exact: { type: 'boolean' }, occurrence: { type: 'integer', minimum: 1, maximum: 100 } }, required: ['text'], additionalProperties: false };
+  if (name === 'verify_report_change') return { type: 'object', properties: { elementId: { type: 'string' }, property: { type: 'string', enum: ['chartType', 'title', 'color'] }, expectedValue: { type: 'string' } }, required: ['elementId', 'property', 'expectedValue'], additionalProperties: false };
   if (name === 'wait_for_element') return { type: 'object', properties: { elementId: { type: 'string' }, timeoutMs: { type: 'number', minimum: 100, maximum: 5000 } }, additionalProperties: false };
   if (name === 'capture_text' || name === 'paste_text') return { type: 'object', properties: { elementId: { type: 'string' }, key: { type: 'string' } }, required: ['elementId', 'key'], additionalProperties: false };
   if (['click', 'double_click', 'clear', 'focus', 'hover', 'check', 'uncheck', 'submit_form'].includes(name)) return elementParameters;
@@ -63,15 +72,18 @@ function parametersFor(name: ToolName): Record<string, unknown> {
   if (name === 'open_tab') return { type: 'object', properties: { url: { type: 'string' } }, additionalProperties: false };
   if (name === 'switch_tab') return { type: 'object', properties: { tabId: { anyOf: [{ type: 'string' }, { type: 'number' }] } }, required: ['tabId'], additionalProperties: false };
   if (name === 'close_tab') return { type: 'object', properties: { tabId: { anyOf: [{ type: 'string' }, { type: 'number' }] } }, additionalProperties: false };
-  if (name === 'scroll') return { type: 'object', properties: { direction: { type: 'string', enum: ['up', 'down'] }, amount: { type: 'number' } }, required: ['direction'], additionalProperties: false };
+  if (name === 'scroll') return { type: 'object', properties: { elementId: { type: 'string', description: 'Optional observed control within the pane to scroll' }, direction: { type: 'string', enum: ['up', 'down'] }, amount: { type: 'number' } }, required: ['direction'], additionalProperties: false };
   return emptyParameters;
 }
 
 export function selectToolNames(goal: string, observation: BrowserObservation, reduced = false): ToolName[] {
   if (observation.responseState?.generating) return ['wait_for_element'];
+  const reportEditing = isPowerBi(observation) && isReportEditGoal(goal);
   const simpleNavigation = /^(go|open|navigate|visit)\b/i.test(goal.trim()) && !/(\band\b|\bthen\b|click|search|find|type|fill|login|log in|sign in|download|upload|submit)/i.test(goal);
-  if (simpleNavigation) return reduced ? ['navigate'] : ['navigate', 'open_tab', 'list_tabs', 'switch_tab'];
+  if (simpleNavigation && !reportEditing) return reduced ? ['navigate'] : ['navigate', 'open_tab', 'list_tabs', 'switch_tab'];
   const names = new Set<ToolName>(['navigate', 'scroll']);
+  if (isPowerBi(observation) || /find|table|row|grid|cell|column/i.test(goal)) names.add('find_element');
+  if (reportEditing) for (const name of ['click', 'double_click', 'hover', 'focus', 'type', 'fill', 'clear', 'press_key', 'select_option', 'check', 'uncheck', 'verify_report_change'] as ToolName[]) names.add(name);
   if (/screenshot|screen shot/i.test(goal)) names.add('take_screenshot');
   if (/\btab[s]?\b/i.test(goal)) for (const name of ['list_tabs', 'open_tab', 'close_tab', 'switch_tab'] as ToolName[]) names.add(name);
   if (/\bback\b/i.test(goal)) names.add('go_back');

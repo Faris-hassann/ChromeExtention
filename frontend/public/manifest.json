@@ -4,7 +4,7 @@
   "description": "A browser agent with OpenRouter and local Ollama fallback, with access to all HTTP(S) sites.",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
-  "permissions": ["sidePanel", "tabs", "scripting", "storage", "activeTab", "debugger"],
+  "permissions": ["sidePanel", "tabs", "scripting", "storage", "activeTab", "debugger", "webNavigation"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "side_panel": { "default_path": "sidepanel.html" },
