@@ -8,11 +8,13 @@
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:azure": "tsx scripts/azure-hello.ts"
+    "test:azure": "tsx scripts/azure-hello.ts",
+    "benchmark:task": "tsx scripts/benchmark-task.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "js-tiktoken": "^1.0.21",
     "ws": "^8.18.3",
     "zod": "^4.1.11"
   },

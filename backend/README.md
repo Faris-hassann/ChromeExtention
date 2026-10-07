@@ -52,3 +52,56 @@ Each task has one active decision and one pending browser action. Matching actio
 Captured answers are held temporarily and pasted verbatim through `capture_text` / `paste_text`; captures over 32 KiB fail explicitly. Azure receives compact task/page context, with no model access to unrestricted browser code or the filesystem.
 
 Redacted JSONL diagnostics are written to `backend/logs/backend.jsonl`, rotated at 5 MiB and limited to five files. `LOG_LEVEL` controls console verbosity. Keys, upstream error bodies, cookies, page text, screenshots and form values are excluded from provider diagnostics.
+
+## Azure usage and estimated cost
+
+Each submitted task is one round, including pause/resume. The panel shows request count, input/output/total tokens, optional reasoning and cached-input tokens, returned function calls, total/average model latency, models/deployments, and estimated USD cost. Expand Request details to inspect each attempt, including failures and cancellations. Browser-only follow-ups are not model requests. Reasoning and cached tokens are subsets, not extra tokens to add to the total. Model latency excludes browser actions and approvals.
+
+Configure your own Azure prices per million tokens in backend/.env:
+
+```dotenv
+AZURE_OPENAI_INPUT_USD_PER_MILLION=
+AZURE_OPENAI_CACHED_INPUT_USD_PER_MILLION=
+AZURE_OPENAI_OUTPUT_USD_PER_MILLION=
+```
+
+Blank, invalid, or negative rates leave the estimate unavailable; explicit zero rates are supported. Cost is ((input - cached) * inputRate + cached * cachedRate + output * outputRate) / 1,000,000. Unknown cache usage permits estimation only when input and cached rates are equal. Reasoning tokens are included in output pricing. This is a configurable estimate, not Azure invoice reconciliation. Missing measurements display Unavailable; totals containing unknown measurements display Partial.
+
+Restart the backend after changing rates, run npm run build from the repository root, and reload the extension at chrome://extensions. Task and request metrics remain in memory for this backend session and are not stored in extension storage or diagnostic files. Completion preserves the displayed totals; submitting another task replaces them. Greeting tests have separate metrics and do not affect task totals. The standalone npm run test:azure --prefix backend script prints its request metrics on success or failure.
+
+GET /api/agent/tasks/:id/metrics returns request records, aggregates, pricing readiness and revision (404 for an unknown task). The server.task_metrics WebSocket event sends revised snapshots after registration and settlement. The panel ignores stale revisions and retrieves the snapshot on reconnect. POST /api/providers/azure/test includes a separate metrics snapshot for greeting requests in the current session.
+
+## Compact planning and local workflows
+
+Azure receives a compact execute_plan interface, short target refs, at most 25 ranked controls, 120-character labels, 500 characters of nearby text and three successful-action summaries. The o200k_base token estimator includes messages and schemas with a framing allowance; estimates differ from authoritative Azure usage. Required instructions and verification remain intact. Context expands with an explanation when essentials exceed the compact target; oversized essential context asks you to split the task instead of silently truncating it.
+
+Plans contain up to six actions. Each executes separately through existing approvals and fresh observations; refs are matched to current elements within their document, frame and widget. Unknown or ambiguous targets require replanning. Confirmed STALE_ELEMENT failures get one local retry; successful actions and uncertain failures are not replayed locally. Pause discards pending plans, and Resume requires fresh validation. Completion and Stop remain terminal. Plan state and page evidence are ephemeral.
+
+Explicit URL navigation, uniquely labelled field updates, Google search, and single-process Power BI workflows can run with zero model calls. Complex or ambiguous tasks use GPT. Power BI selects between process cells and scoped filter/slicer controls; it never uses global search to filter a process. A selected cell alone verifies selection, not filtering. Applied filter state or changed related visual data is required for filtering. Pending Apply controls are not treated as applied filters. When a route fails to verify, the workflow tries the other route once, undoing only a confirmed selection it introduced. Preexisting or uncertain selections are preserved. Ambiguity or unsupported controls go back to the model or prompt the user.
+
+Optional backend environment settings:
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| AGENT_CONTEXT_TARGET_TOKENS | 1500 | Compact per-request estimated input target |
+| AGENT_CONTEXT_MAX_TOKENS | 3000 | Expanded essential-context limit |
+| AGENT_WARN_LLM_REQUESTS | 2 | Advisory request threshold per task |
+| AGENT_WARN_INPUT_TOKENS | 1500 | Advisory actual input-token threshold per task |
+| AGENT_WARN_COST_USD | 0.0011 | Advisory cost threshold, when usage/prices are known |
+
+Budget warnings appear once per threshold and continue execution. They do not override automatic-step or no-progress pauses. Existing AZURE_OPENAI_MAX_COMPLETION_TOKENS is unchanged. Restart the backend after editing settings; run npm run build at the repository root and reload the extension.
+
+The panel and metrics API distinguish model/local/recovery browser actions and show estimated prompt tokens, returned plan size and warnings. An execute_plan reply is one returned function call even when it contains several browser actions. Greetings remain separate. No metrics or plans are persisted.
+
+### Opt-in live benchmark
+
+Run the dashboard task yourself, copy its Task ID from Task metrics, then run:
+
+```powershell
+npm run benchmark:task --prefix backend -- --task-id YOUR_TASK_ID
+```
+
+This script only reads current-session metrics; it never starts a browser task or paid model request. It compares actual request/token counts with the earlier baseline of 4 requests and 12,831 input tokens, and reports latency, estimated cost and input-token reduction. For partial usage or pending requests it leaves the reduction unavailable. The initial goal is 0-2 calls and roughly 500-1,500 total input tokens for simple tasks; 90% savings remains a benchmark target, not a promise for all pages. Live cost comparison requires your actual Azure prices.
+
+
+Task-state WebSocket events and GET /api/agent/tasks/:id/metrics now include an optional reason object (code, message, nextAction) alongside state. Reasons explain completion, pauses, manual stops, approval/input requirements, connection loss, failed verification, execution limits and errors. They are cleared when execution continues and retained after termination. Accounting may still settle later; that does not alter terminal task state. The extension presents these as automatic round summaries rather than inferring stop reasons from log text. Restart the backend and rebuild/reload the extension together for this update.

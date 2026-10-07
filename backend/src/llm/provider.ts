@@ -1,11 +1,12 @@
+import { MetricsStore, requestTracker, type MetricsListener } from './metrics.js';
 import { config } from '../config.js';
 import { log } from '../logger.js';
 import type { AgentDecision, BrowserObservation } from '../types.js';
-import { decisionContext, parseToolDecision, type ChatResponse } from './context.js';
+import { ContextBudgetError, decisionContext, parseToolDecision, type ChatResponse } from './context.js';
 import { ProviderError, type ProgressListener, type ProviderProgress } from './progress.js';
 
 export interface DecisionProvider {
-  decide(goal: string, observation: BrowserObservation, memory: Record<string, unknown>, signal?: AbortSignal, onProgress?: ProgressListener): Promise<AgentDecision>;
+  decide(goal: string, observation: BrowserObservation, memory: Record<string, unknown>, signal?: AbortSignal, onProgress?: ProgressListener, onMetrics?: MetricsListener): Promise<AgentDecision>;
 }
 
 export type AzureSettings = Pick<typeof config, 'azureEndpoint' | 'azureApiKey' | 'azureDeployment' | 'azureApiVersion' | 'azureTimeoutMs' | 'azureMaxTokens'>;
@@ -57,6 +58,8 @@ export function azureRequestUrl(settings: AzureSettings) {
 
 export class AzureOpenAIProvider implements DecisionProvider {
   private lastRequest?: RequestOutcome;
+  private greetingMetrics = new MetricsStore(null);
+  testMetrics() { return this.greetingMetrics.snapshot(); }
   private accessTest?: Promise<{ text: string; elapsedMs: number }>;
   constructor(private readonly settings: AzureSettings = config) {}
 
@@ -70,7 +73,7 @@ export class AzureOpenAIProvider implements DecisionProvider {
     const started = performance.now();
     try {
       const { azureHello } = await import('./azure-hello.js');
-      const reply = await azureHello(this.settings);
+      const reply = await azureHello(this.settings, fetch, undefined, record => this.greetingMetrics.accept(record));
       this.lastRequest = { outcome: 'succeeded', timestamp: new Date().toISOString(), elapsedMs: reply.elapsedMs, message: 'Azure connection verified: the deployment replied to the greeting test.' };
       return reply;
     } catch (error) {
@@ -93,7 +96,7 @@ export class AzureOpenAIProvider implements DecisionProvider {
     };
   }
 
-  async decide(goal: string, observation: BrowserObservation, memory: Record<string, unknown>, signal?: AbortSignal, onProgress?: ProgressListener): Promise<AgentDecision> {
+  async decide(goal: string, observation: BrowserObservation, memory: Record<string, unknown>, signal?: AbortSignal, onProgress?: ProgressListener, onMetrics?: MetricsListener): Promise<AgentDecision> {
     if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
     const configuration = azureConfiguration(this.settings);
     if (!configuration.configured) throw new ProviderError(configuration.reason, 'CONFIGURATION');
@@ -109,23 +112,28 @@ export class AzureOpenAIProvider implements DecisionProvider {
     };
     publish('started', `Using Azure OpenAI deployment ${this.settings.azureDeployment}.`);
     const waiting = setInterval(() => publish('waiting', 'Waiting for Azure OpenAI…'), 5000);
+    let tracker: ReturnType<typeof requestTracker> | undefined;
+    let outcome: 'succeeded' | 'failed' | 'cancelled' = 'failed';
     try {
       const url = azureRequestUrl(this.settings);
       const context = decisionContext(goal, observation, memory);
+      tracker = requestTracker(this.settings.azureDeployment, observation.taskId, onMetrics);
+      tracker.planning(context.estimatedInputTokens);
+      if (context.expanded) publish('waiting', 'Expanded context: essential instructions or verification need more than the compact input target.');
       const response = await fetch(url, {
         method: 'POST', signal: requestSignal, redirect: 'error',
         headers: { 'api-key': this.settings.azureApiKey, 'content-type': 'application/json' },
         body: JSON.stringify({ messages: context.messages, tools: context.tools, tool_choice: 'required', parallel_tool_calls: false, max_completion_tokens: this.settings.azureMaxTokens, stream: false }),
       });
-      requestSignal.throwIfAborted();
       if (!response.ok) {
         let code: unknown;
-        try { code = (await response.json() as AzureResponse).error?.code; } catch { /* Never expose upstream response bodies. */ }
+        try { const errorBody = await response.json() as AzureResponse; tracker.capture(errorBody, this.settings.azureApiKey); code = errorBody.error?.code; } catch { /* Never expose upstream response bodies. */ }
         throw azureHttpFailure(response.status, code);
       }
       let body: AzureResponse;
       try { body = await response.json() as AzureResponse; }
       catch { throw new ProviderError('Azure returned malformed JSON.', 'INVALID_RESPONSE'); }
+      tracker.capture(body, this.settings.azureApiKey);
       requestSignal.throwIfAborted();
       if (!body || typeof body !== 'object') throw new ProviderError('Azure returned an invalid response.', 'INVALID_RESPONSE');
       if (body.error) throw azureHttpFailure(response.status, body.error.code);
@@ -133,14 +141,18 @@ export class AzureOpenAIProvider implements DecisionProvider {
       if (choice?.finish_reason === 'content_filter') throw new ProviderError('Azure filtered the response under its content policy.', 'CONTENT_FILTER');
       if (choice?.finish_reason === 'length') throw new ProviderError('Azure reached the completion token limit. Increase AZURE_OPENAI_MAX_COMPLETION_TOKENS before starting a new task.', 'OUTPUT_LIMIT');
       let decision: AgentDecision;
-      try { decision = parseToolDecision({ message: choice?.message }, context.tools); }
+      try { decision = parseToolDecision({ message: choice?.message }, context.tools, context.bindings, context.allowed); }
       catch { throw new ProviderError('Azure returned an invalid decision. Exactly one offered tool with valid arguments is required.', 'INVALID_DECISION'); }
       this.lastRequest = { outcome: 'succeeded', timestamp: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), message: 'The last Azure request succeeded.' };
+      tracker.planning(context.estimatedInputTokens, decision.type === 'execution_plan' ? decision.actions.length : 0);
       publish('succeeded', `Azure OpenAI succeeded (${this.settings.azureDeployment}).`);
+      outcome = 'succeeded';
       return decision;
     } catch (error) {
+      if (error instanceof ContextBudgetError) return { type: 'user_input_required', question: error.message };
       const elapsedMs = Math.round(performance.now() - started);
       if (signal?.aborted) {
+        outcome = 'cancelled';
         this.lastRequest = { outcome: 'cancelled', timestamp: new Date().toISOString(), elapsedMs, message: 'The last Azure request was cancelled. Access is unverified.' };
         throw new DOMException('Task cancelled', 'AbortError');
       }
@@ -148,6 +160,6 @@ export class AzureOpenAIProvider implements DecisionProvider {
       this.lastRequest = { outcome: 'failed', timestamp: new Date().toISOString(), elapsedMs, message: failure.message, code: failure.code, status: failure.status };
       publish('failed', failure.message, { code: failure.code, status: failure.status });
       throw failure;
-    } finally { clearInterval(waiting); clearTimeout(timer); }
+    } finally { clearInterval(waiting); clearTimeout(timer); tracker?.finish(outcome); }
   }
 }

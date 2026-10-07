@@ -9,6 +9,24 @@ beforeEach(() => { Object.assign(config, { azureEndpoint: 'https://resource.open
 afterEach(async () => { Object.assign(config, originalConfig); vi.restoreAllMocks(); await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve())))); });
 
 describe('diagnostic ingestion', () => {
+  it('serves revised task accounting with no credentials and returns 404 for unknown tasks', async () => {
+    const application = createApp(); const server = application.app.listen(0); servers.push(server);
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const originalFetch = globalThis.fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => String(url).startsWith('https://resource.openai.azure.com') ? Promise.resolve(new Response(JSON.stringify({ model: 'mini-version', usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }, choices: [{ message: { tool_calls: [{ type: 'function', function: { name: 'complete_task', arguments: '{"summary":"Verified"}' } }] } }] }))) : originalFetch(url, init));
+    const task = application.orchestrator.create('Read example');
+    const path = `${base}/api/agent/tasks/${task.id}/metrics`;
+    const initial = await fetch(path);
+    expect(initial.headers.get('cache-control')).toBe('no-store');
+    expect(await initial.json()).toMatchObject({ revision: 0, requestCount: 0 });
+    await application.orchestrator.observe(task.id, { taskId: task.id, observationId: 'o', timestamp: '', tabId: '1', url: 'https://example.com', title: 'Example', loadingState: 'complete', interactiveElements: [] }, task.observationRequestId);
+    const snapshot = await (await fetch(path)).json();
+    expect(snapshot).toMatchObject({ revision: 2, requestCount: 1, requests: [{ outcome: 'succeeded', totalTokens: 15, model: 'mini-version', provider: 'azure' }], aggregates: { totalTokens: { value: 15, partial: false } } });
+    expect(task.state).toBe('COMPLETED');
+    expect(JSON.stringify(snapshot)).not.toMatch(/private-api-key|summary|arguments|messages|Example/);
+    expect((await fetch(`${base}/api/agent/tasks/missing/metrics`)).status).toBe(404);
+  });
   it('verifies access with one greeting and updates the running backend status', async () => {
     const { app } = createApp(); const server = app.listen(0); servers.push(server);
     await new Promise<void>(resolve => server.once('listening', resolve));
@@ -20,6 +38,7 @@ describe('diagnostic ingestion', () => {
     const response = await fetch(`${base}/api/providers/azure/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     const body = await response.json();
     expect(response.status).toBe(200); expect(body).toMatchObject({ reply: 'Hi!', status: { availability: 'available', lastRequest: { outcome: 'succeeded' } } });
+    expect(body.metrics).toMatchObject({ taskId: null, requestCount: 1, requests: [{ outcome: 'succeeded' }] });
     expect(JSON.stringify(body)).not.toContain('private-api-key');
     expect((await (await fetch(`${base}/api/providers/azure/status`)).json()).availability).toBe('available');
     expect(azureCalls).toHaveBeenCalledTimes(1);
@@ -78,6 +97,9 @@ describe('diagnostic ingestion', () => {
     await instance.orchestrator.observe(task.id, observation, task.observationRequestId);
     expect(instance.orchestrator.tasks.get(task.id)?.state).toBe('FAILED');
     expect(azureCalls).toHaveBeenCalledTimes(1);
+    const accounting = await (await fetch(`${base}/api/agent/tasks/${task.id}/metrics`)).json();
+    expect(accounting).toMatchObject({state:'FAILED',reason:{code:'EXECUTION_ERROR'},requestCount:1});
+    expect(JSON.stringify(accounting)).not.toContain('private-api-key');
     const status = await (await fetch(`${base}/api/providers/azure/status`)).json();
     expect(status).toMatchObject({ availability: 'unavailable', lastRequest: { outcome: 'failed', code: 'AUTHENTICATION' } });
     expect(JSON.stringify(status)).not.toContain('private-api-key');

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { BUILD_VERSION } from '../shared/build-version';
 import { App } from './main';
+import { snapshot } from '../shared/metrics-fixture';
 
 let socket: any;
 let chromeMock: any;
@@ -117,7 +118,7 @@ describe('side-panel recovery controls', () => {
     let finish!: (response: any) => void;
     const check = vi.fn().mockReturnValue(new Promise(resolve => { finish = resolve; }));
     vi.mocked(fetch).mockImplementation((url: any, init?: any) => String(url).endsWith('/api/providers/azure/test') ? check(url, init) : original(url, init));
-    render(<App/>); await screen.findByText('Azure OpenAI: unverified');
+    render(<App/>); await screen.findByText('Azure: Not connected'); fireEvent.click(screen.getByRole('button', {name:'Settings'})); await screen.findByText('Azure OpenAI: unverified');
     const button = screen.getByRole('button', { name: 'Test Azure connection' });
     fireEvent.click(button); fireEvent.click(button);
     await waitFor(() => expect(check).toHaveBeenCalledTimes(1));
@@ -130,16 +131,16 @@ describe('side-panel recovery controls', () => {
   it('displays a failed Azure test without claiming verified access', async () => {
     const original = vi.mocked(fetch).getMockImplementation()!;
     vi.mocked(fetch).mockImplementation(async (url: any, init?: any) => String(url).endsWith('/api/providers/azure/test') ? { ok: false, json: async () => ({ error: 'Azure access was denied.', status: { configured: true, availability: 'unavailable', reason: 'Azure access was denied.' } }) } as any : original(url, init));
-    render(<App/>); await screen.findByText('Azure OpenAI: unverified');
+    render(<App/>); await screen.findByText('Azure: Not connected'); fireEvent.click(screen.getByRole('button', {name:'Settings'})); await screen.findByText('Azure OpenAI: unverified');
     fireEvent.click(screen.getByRole('button', { name: 'Test Azure connection' }));
     await screen.findByText('Azure OpenAI: unavailable');
-    expect(screen.getByText('Testing Azure connection: Azure access was denied.')).toBeTruthy();
+    expect(screen.getByText('Azure access was denied.')).toBeTruthy(); expect(screen.getByText('Azure: Not connected')).toBeTruthy();
     expect(screen.queryByText(/Azure reply:/)).toBeNull();
   });
   it('blocks submission with missing Azure configuration and exposes no model or credential selectors', async () => {
     const original = vi.mocked(fetch).getMockImplementation()!;
     vi.mocked(fetch).mockImplementation(async (url: any, init?: any) => String(url).includes('/api/providers/azure/status') ? { ok: true, json: async () => ({ configured: false, availability: 'unconfigured', missing: ['Azure_openAI_API_KEY'], reason: 'Missing Azure_openAI_API_KEY. Add it to backend/.env.', checkedAt: new Date().toISOString() }) } as any : original(url, init));
-    render(<App/>); await screen.findByText('Azure OpenAI: unconfigured');
+    render(<App/>); await screen.findByText('Azure: Not connected');
     fireEvent.change(screen.getByPlaceholderText('Ask me to work in your browser…'), { target: { value: 'Open example.com' } });
     expect(screen.getByRole('button', { name: '↑' }).hasAttribute('disabled')).toBe(true);
     fireEvent.keyDown(screen.getByPlaceholderText('Ask me to work in your browser…'), { key: 'Enter' });
@@ -150,22 +151,22 @@ describe('side-panel recovery controls', () => {
     expect(screen.queryByRole('textbox', { name: /API key/i })).toBeNull();
   });
   it('shows configuration readiness without claiming Azure access is verified', async () => {
-    render(<App/>); await screen.findByText('Azure OpenAI: unverified');
+    render(<App/>); await screen.findByText('Azure: Not connected'); fireEvent.click(screen.getByRole('button', {name:'Settings'})); await screen.findByText('Azure OpenAI: unverified');
     expect(screen.getByText('Configuration ready; access unverified.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh Azure status' }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/providers/azure/status'), expect.anything()));
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('openrouter'))).toBe(false);
-    await startTask(); expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name:'Back to task'})); await startTask(); expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy();
   });
   it('shows Azure failure, waiting and elapsed results without fallback', async () => {
     render(<App/>); await startTask();
     await message({ event: 'server.provider_progress', taskId: 'task-1', payload: { provider: 'azure', phase: 'failed', model: 'my-azure-mini', message: 'Azure rate limit reached.', elapsedMs: 850, status: 429 } });
     expect(screen.getAllByText(/Azure rate limit reached/).length).toBeGreaterThan(0);
     await message({ event: 'server.provider_progress', taskId: 'task-1', payload: { provider: 'azure', phase: 'waiting', model: 'my-azure-mini', message: 'Waiting for Azure OpenAI...', elapsedMs: 5000 } });
-    expect(screen.getByText(/waiting.*5.0s/)).toBeTruthy();
+    expect(screen.queryByRole('region', {name:'Azure OpenAI status'})).toBeNull();
     await message({ event: 'server.provider_progress', taskId: 'task-1', payload: { provider: 'azure', phase: 'succeeded', model: 'my-azure-mini', message: 'Azure request succeeded.', elapsedMs: 6200 } });
     expect(screen.getAllByText(/Azure request succeeded/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Diagnostics \(/).closest('details')?.open).toBe(true);
+    expect(screen.queryByRole('region', {name:'Diagnostics'})).toBeNull();
     await message({ event: 'server.activity', taskId: 'task-1', payload: { message: 'After Click: Table cell selected in Process Name.' } });
     expect(screen.getAllByText(/Table cell selected/).length).toBeGreaterThan(0);
     await message({ event: 'server.provider_progress', taskId: 'unrelated-task', payload: { provider: 'azure', phase: 'failed', model: 'other', message: 'Unrelated failure' } });
@@ -214,5 +215,125 @@ describe('side-panel recovery controls', () => {
     await screen.findByText(/Reload Local Browser Agent/);
     fireEvent.change(screen.getByPlaceholderText('Ask me to work in your browser…'), { target: { value: 'open ChatGPT' } });
     expect(screen.getByRole('button', { name: '↑' }).hasAttribute('disabled')).toBe(true);
+  });
+});
+
+
+describe('task metrics transport', () => {
+  it('shows greeting metrics separately without changing task totals or persisting metric snapshots', async () => {
+    render(<App/>); await startTask();
+    await message({ event: 'server.task_metrics', taskId: 'task-1', payload: snapshot() });
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    const greeting = { ...snapshot(), taskId: null, requestCount: 5 };
+    vi.mocked(fetch).mockImplementation((url: any, init?: any) => String(url).endsWith('/api/providers/azure/test') ? Promise.resolve({ ok: true, json: async () => ({ reply: 'Hi!', status: { configured: true, availability: 'available', reason: 'Verified' }, metrics: greeting }) } as Response) : original(url, init));
+    fireEvent.click(screen.getByRole('button', {name:'Settings'})); fireEvent.click(screen.getByRole('button', { name: 'Test Azure connection' }));
+    expect((await screen.findByRole('region', { name: 'Azure connection test metrics' })).textContent).toContain('LLM requests5');
+    expect(screen.queryByRole('region', {name:'Task metrics'})).toBeNull(); fireEvent.click(screen.getByRole('button', {name:'Back to task'})); expect(screen.getByText(/Azure requests sent:/).textContent).toContain('1');
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/diagnostics/events')).every(([, init]) => !String(init?.body).includes('server.task_metrics'))).toBe(true);
+  });
+  it('keeps terminal metrics, accepts late settlement and ignores old or unrelated snapshots', async () => {
+    render(<App/>); await startTask();
+    const metrics = snapshot();
+    await message({ event: 'server.task_metrics', taskId: 'task-1', payload: metrics });
+    expect(screen.queryByRole('region', {name:'Task metrics'})).toBeNull(); expect(screen.getByText(/Azure requests sent:/).textContent).toContain('1');
+    await message({ event: 'server.task_state', taskId: 'task-1', payload: { state: 'COMPLETED' } });
+    await message({ event: 'server.task_metrics', taskId: 'task-1', payload: { ...metrics, revision: 3, requestCount: 2 } });
+    expect(screen.getByRole('region', { name: 'Task metrics' }).textContent).toContain('LLM requests2');
+    await message({ event: 'server.task_metrics', taskId: 'task-1', payload: metrics });
+    await message({ event: 'server.task_metrics', taskId: 'other', payload: { ...metrics, taskId: 'other', revision: 100 } });
+    expect(screen.getByRole('region', { name: 'Task metrics' }).textContent).toContain('LLM requests2');
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New task' } });
+    fireEvent.click(screen.getByRole('button', { name: '↑' }));
+    await waitFor(() => expect(taskCounter).toBe(2));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Task metrics' })).toBeNull());
+  });
+  it('accepts cancelled-task accounting after Stop', async () => {
+    render(<App/>); await startTask(); fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    await message({ event: 'server.task_metrics', taskId: 'task-1', payload: snapshot() });
+    expect(screen.getByRole('region', { name: 'Task metrics' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
+  });
+  it('restores metrics on reconnect', async () => {
+    render(<App/>); await startTask();
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation((url: any, init?: any) => String(url).endsWith('/task-1/metrics') ? Promise.resolve({ ok: true, json: async () => ({...snapshot(),state:'PAUSED',reason:{code:'DISCONNECTED',message:'Backend connection lost.'}}) } as Response) : original(url, init));
+    await act(async () => { socket.onopen(); });
+    await screen.findByRole('region', { name: 'Task metrics' });
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/agent/tasks/task-1/metrics'));
+  });
+});
+
+
+describe('panel views and interruption summaries', () => {
+  it('shows disconnection and preserves a frontend input interruption through a generic backend pause',async()=>{
+    render(<App/>);await startTask();await message({event:'server.task_metrics',taskId:'task-1',payload:snapshot()});
+    background={ok:false,code:'INPUT_UNAVAILABLE',error:'Input is unavailable.'};
+    await message({event:'server.action_request',taskId:'task-1',payload:{tool:'click',arguments:{elementId:'el_1'}}});
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'PAUSED',reason:{code:'USER_PAUSE',message:'You paused this task.'}}});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('The browser cannot accept automated input.');
+    fireEvent.click(screen.getByRole('button',{name:'Resume'}));
+    await act(async()=>{socket.onclose({code:1006,wasClean:false});});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('The connection to the backend was lost.');
+    expect(screen.getByText('Azure: Not connected')).toBeDefined();
+  });
+  it('does not let a delayed reconnect snapshot replace a newer completion',async()=>{
+    render(<App/>);await startTask();const original=vi.mocked(fetch).getMockImplementation()!;
+    let finish!: (response:any)=>void;
+    vi.mocked(fetch).mockImplementation((url:any,init?:any)=>String(url).endsWith('/task-1/metrics')?new Promise(resolve=>{finish=resolve;}):original(url,init));
+    await act(async()=>{socket.onopen();});
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'COMPLETED',reason:{code:'GOAL_VERIFIED',message:'All requested work is verified.'}}});
+    await act(async()=>{finish({ok:true,json:async()=>({...snapshot(),state:'RUNNING'})});});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('All requested work is verified.');
+    expect(screen.queryByRole('button',{name:'Resume'})).toBeNull();
+  });
+  it('keeps executing while Diagnostics and Settings are open and preserves the conversation', async () => {
+    render(<App/>); await startTask();
+    expect(screen.queryByRole('button',{name:'Test Azure connection'})).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'Diagnostics'}));
+    expect(screen.getByRole('region',{name:'Diagnostics'})).toBeDefined();
+    background={ok:true}; await message({event:'server.action_request',taskId:'task-1',toolCallId:'in-logs',payload:{tool:'click',arguments:{elementId:'el_1'}}});
+    expect(chromeMock.runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({type:'EXECUTE'}));
+    fireEvent.click(screen.getByRole('button',{name:'Settings'})); expect(screen.queryByRole('region',{name:'Diagnostics'})).toBeNull();
+    expect(screen.getByRole('button',{name:'Test Azure connection'})).toBeDefined();
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'COMPLETED',reason:{code:'GOAL_VERIFIED',message:'The dashboard filter is verified.'}}});
+    await message({event:'server.task_metrics',taskId:'task-1',payload:snapshot()});
+    fireEvent.click(screen.getByRole('button',{name:'Back to task'}));
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('The dashboard filter is verified.');
+    expect(screen.getByText('open ChatGPT and search the answer on Google')).toBeDefined();
+  });
+  it('shows only the request counter while running and hides the summary on Resume',async()=>{
+    render(<App/>); await startTask();await message({event:'server.task_metrics',taskId:'task-1',payload:snapshot()});
+    expect(screen.getByText(/Azure requests sent:/).textContent).toContain('1');expect(screen.queryByRole('table',{name:'Task metrics'})).toBeNull();
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'PAUSED',reason:{code:'NO_PROGRESS',message:'No visible progress.',nextAction:'Review the page.'}}});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('No visible progress.');
+    fireEvent.click(screen.getByRole('button',{name:'Resume'}));
+    expect(screen.queryByRole('article',{name:'Round summary'})).toBeNull();expect(screen.getByText(/Azure requests sent:/).textContent).toContain('1');
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'PAUSED',reason:{code:'INPUT_REQUIRED',message:'Which process should I use?'}}});
+    await message({event:'server.task_state',taskId:'task-1',payload:{state:'PAUSED',reason:{code:'INPUT_REQUIRED',message:'Which process should I use?'}}});
+    expect(screen.getAllByRole('article',{name:'Round summary'})).toHaveLength(1);expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('Which process should I use?');
+  });
+  it('shows metrics for approval and site access while keeping their action controls',async()=>{
+    render(<App/>);await startTask();await message({event:'server.task_metrics',taskId:'task-1',payload:snapshot()});
+    await message({event:'server.approval_request',taskId:'task-1',toolCallId:'approval',payload:{risk:'HIGH',actionSummary:'Submit form',site:'https://google.com'}});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('approval');expect(screen.getByRole('button',{name:'Approve once'})).toBeDefined();
+    fireEvent.click(screen.getByRole('button',{name:'Stop'}));
+    expect(screen.queryByRole('button',{name:'Approve once'})).toBeNull();expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('You stopped this task.');
+  });
+  it('shows permission and disconnection explanations, and rejects stale reconnect state',async()=>{
+    render(<App/>);await startTask();await message({event:'server.task_metrics',taskId:'task-1',payload:snapshot()});
+    background={ok:false,code:'SITE_ACCESS_REQUIRED',origin:'https://chatgpt.com/*',hostname:'chatgpt.com',retryable:true};
+    await message({event:'server.action_request',taskId:'task-1',payload:{tool:'observe_page'}});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('Website permission is needed');
+    fireEvent.click(screen.getByRole('button',{name:'Stop'}));
+    await message({event:'server.task_metrics',taskId:'task-1',payload:{...snapshot(),revision:3,state:'RUNNING'}});
+    expect(screen.getByRole('article',{name:'Round summary'}).textContent).toContain('Task stopped');
+    expect(screen.getByText('Azure: Not connected')).toBeDefined();
+  });
+  it('logs each actual request once without storing its usage in diagnostic events',async()=>{
+    render(<App/>);await startTask();const metrics={...snapshot(),requests:[{requestId:'one',taskId:'task-1',outcome:'pending'}]};
+    await message({event:'server.task_metrics',taskId:'task-1',payload:metrics});await message({event:'server.task_metrics',taskId:'task-1',payload:{...metrics,revision:3,requests:[{...metrics.requests[0],outcome:'succeeded'}]}});
+    fireEvent.click(screen.getByRole('button',{name:'Diagnostics'}));expect(screen.getAllByText('Request sent to Azure')).toHaveLength(1);
+    expect(chromeMock.storage.local.get).toHaveBeenCalled();expect(chromeMock.storage.local.set).toBeUndefined();
   });
 });

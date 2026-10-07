@@ -28,13 +28,13 @@ export function createApp() {
     res.setHeader('Cache-Control', 'no-store');
     try {
       const reply = await azure.testAccess();
-      res.json({ status: azure.status(), reply: reply.text, elapsedMs: reply.elapsedMs });
+      res.json({ status: azure.status(), reply: reply.text, elapsedMs: reply.elapsedMs, metrics: azure.testMetrics() });
     } catch (error) {
       const failure = error instanceof ProviderError ? error : new ProviderError('Azure connection test failed.', 'NETWORK_ERROR');
-      res.status(failure.code === 'CONFIGURATION' ? 503 : 502).json({ status: azure.status(), error: failure.message, code: failure.code });
+      res.status(failure.code === 'CONFIGURATION' ? 503 : 502).json({ status: azure.status(), error: failure.message, code: failure.code, metrics: azure.testMetrics() });
     }
   });
-  app.get('/api/settings/runtime', (_req, res) => res.json({ llmProvider: 'azure', azureDeployment: config.azureDeployment, azureApiVersion: config.azureApiVersion, azureConfigured: azureConfiguration().configured, azureTimeoutMs: config.azureTimeoutMs, azureMaxTokens: config.azureMaxTokens, maxSteps: config.maxSteps, recoveryLimit: config.recoveryLimit }));
+  app.get('/api/settings/runtime', (_req, res) => res.json({ llmProvider: 'azure', azureDeployment: config.azureDeployment, azureApiVersion: config.azureApiVersion, azureConfigured: azureConfiguration().configured, azureTimeoutMs: config.azureTimeoutMs, azureMaxTokens: config.azureMaxTokens, contextTargetTokens: config.contextTargetTokens, contextMaxTokens: config.contextMaxTokens, budgetWarnings: { requests: config.warnRequests, inputTokens: config.warnInputTokens, costUsd: config.warnCostUsd, behavior: 'warn_and_continue' }, maxSteps: config.maxSteps, recoveryLimit: config.recoveryLimit }));
   app.post('/api/diagnostics/events', (req, res) => {
     if (Buffer.byteLength(JSON.stringify(req.body ?? null)) > 128 * 1024) return res.status(413).json({ error: 'Diagnostic batch exceeds 128 KiB', stage: 'http.diagnostics.size' });
     const parsed = diagnosticBatchSchema.safeParse(req.body);
@@ -44,6 +44,12 @@ export function createApp() {
   });
   let orchestrator: AgentOrchestrator;
   app.post('/api/agent/tasks', (req, res) => { const goal = typeof req.body?.goal === 'string' ? req.body.goal.trim() : ''; if (!goal) return res.status(400).json({ error: 'goal is required', stage: 'http.create_task' }); const approvalMode = req.body?.approvalMode ?? 'auto'; if (!['auto', 'manual', 'always'].includes(approvalMode)) return res.status(400).json({ error: 'Invalid approval mode' }); const azureConfig = azureConfiguration(); if (!azureConfig.configured) return res.status(503).json({ error: azureConfig.reason, code: 'AZURE_CONFIGURATION', missing: azureConfig.missing, issues: azureConfig.issues }); res.status(201).json(orchestrator.create(goal, approvalMode)); });
+  app.get('/api/agent/tasks/:id/metrics', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const task = orchestrator.tasks.get(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    return res.json(orchestrator.metrics(task));
+  });
   app.post('/api/agent/tasks/:id/control', (req, res) => { try { orchestrator.control(req.params.id, req.body?.action); res.json({ ok: true }); } catch (error) { log('error', 'http.task_control.failed', { taskId: req.params.id, action: req.body?.action, error: describeError(error) }); res.status(404).json({ error: (error as Error).message, stage: 'http.task_control' }); } });
   const attachWebSocket = (server: Server) => {
     const wss = new WebSocketServer({ server, path: '/ws' });

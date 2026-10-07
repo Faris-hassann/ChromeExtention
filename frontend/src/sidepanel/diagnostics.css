@@ -60,4 +60,18 @@
 .provider-progress.succeeded { background: #eef8ef; }
 .activity-time { display: block; font-size: 10px; color: #777; margin-bottom: 3px; }
 .message.user .activity-time { color: #ccc; }
+.diagnostics-view { flex: 1; overflow: auto; padding: 18px 14px; }
+.diagnostics-view h2 { font-size: 20px; margin-bottom: 8px; }
+.diagnostics-view > p { font-size: 12px; color: #656760; line-height: 1.5; }
+.diagnostic-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+.diagnostic-filters label { display: grid; gap: 5px; font-size: 12px; }
+.diagnostic-filters label:last-child { grid-column: 1 / -1; display: flex; align-items: center; }
+.diagnostic-filters select { padding: 8px; border: 1px solid #d8d8d2; border-radius: 8px; background: white; }
+.diagnostic-timeline { list-style: none; padding: 0; margin: 0; border: 1px solid #deded8; border-radius: 10px; overflow: hidden; background: #fff; }
+.diagnostic-timeline .diagnostic-entry { padding: 12px; font-size: 12px; }
+.diagnostic-timeline time { display: inline; font-size: 11px; }
+.diagnostic-severity { float: right; font-size: 10px; padding: 2px 5px; background: #f0f0eb; border-radius: 4px; }
+.diagnostic-timeline strong { font-size: 13px; margin-top: 7px; }
+.diagnostic-timeline p { margin-bottom: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.diagnostic-timeline details { margin-top: 9px; }
 .statusbar { min-height: 34px; height: auto; padding-top: 6px; padding-bottom: 6px; flex-wrap: wrap; text-transform: none; }

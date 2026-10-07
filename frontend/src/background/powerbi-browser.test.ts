@@ -13,6 +13,39 @@ afterEach(() => vi.unstubAllGlobals());
 const evaluate = <F extends (...args: any[]) => any>(frame: Frame | Page, func: F, args: unknown[] = []): Promise<Awaited<ReturnType<F>>> => frame.evaluate(`(${func.toString()})(...${JSON.stringify(args)})`);
 
 describe('Power BI editing and frame geometry in Chromium', () => {
+  it('collects real filter evidence and excludes checkbox choices awaiting Apply', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<section class="filterCard" aria-label="Process Name filter"><label><input type="checkbox" checked>825444_Care_UK_CBUPorting</label><button onclick="this.disabled=true">Apply</button></section><div class="visualContainer" aria-label="Related dashboard">825444_Care_UK_CBUPorting: 12 ports</div><div class="visualContainer" aria-label="Processes"><table><tr><th>Process Name</th></tr><tr><td>825444_Care_UK_CBUPorting</td></tr></table></div>');
+      const pending = await evaluate(page, collectPage, []);
+      expect(pending.dashboardEvidence.filters).toHaveLength(0);
+      expect(pending.interactiveElements.find(element => element.name === 'Apply')?.widget).toBe('Process Name filter');
+      await page.getByRole('button', { name: 'Apply' }).click();
+      const applied = await evaluate(page, collectPage, []);
+      expect(applied.dashboardEvidence.filters).toMatchObject([{ label: 'Process Name filter', value: '825444_Care_UK_CBUPorting' }]);
+      expect(applied.dashboardEvidence.visuals.find(visual => visual.key === 'Related dashboard')).toMatchObject({ processTable: false, text: '825444_Care_UK_CBUPorting: 12 ports' });
+      expect(applied.dashboardEvidence.visuals.find(visual => visual.key === 'Processes')?.processTable).toBe(true);
+    } finally { await page.close(); }
+  });
+  it('refreshes a stale process target locally and observes cross-selection in another visual', async () => {
+    const page = await browser.newPage();
+    try {
+      const identifier = '825444_Care_UK_CBUPorting';
+      await page.setContent(`<div class="visualContainer" aria-label="Processes"><table><tr><th>Process Name</th></tr><tr><td aria-selected="false" onclick="this.setAttribute('aria-selected','true');document.querySelector('#related').textContent='${identifier}: filtered ports';">${identifier}</td></tr></table></div><div id="related" class="visualContainer" aria-label="Related dashboard">All processes</div>`);
+      const first = await evaluate(page, collectPage, []);
+      const old = await evaluate(page, collectTableTargets, [{ text: identifier, column: 'Process Name' }]);
+      await evaluate(page, collectPage, []);
+      expect(await evaluate(page, resolveInputTarget, [old.chosenElementId])).toMatchObject({ ok: false, code: 'STALE_ELEMENT' });
+      const fresh = await evaluate(page, collectTableTargets, [{ text: identifier, column: 'Process Name' }]);
+      expect(fresh.chosenElementId).not.toBe(old.chosenElementId);
+      expect(await evaluate(page, executeInPage, ['click', { elementId: fresh.chosenElementId }])).toMatchObject({ ok: true });
+      const after = await evaluate(page, collectPage, []);
+      const rows = await evaluate(page, collectTableTargets, [{ text: identifier, column: 'Process Name' }]);
+      expect(rows.interactiveElements.some(element => 'searchMatch' in element && element.searchMatch && 'selected' in element && element.selected)).toBe(true);
+      expect(after.dashboardEvidence.visuals.find(visual => visual.key === 'Related dashboard')?.text).toBe(identifier + ': filtered ports');
+      expect(first.dashboardEvidence.visuals.find(visual => visual.key === 'Related dashboard')?.text).toBe('All processes');
+    } finally { await page.close(); }
+  });
   it('finds the exact process in its column and clicks the first duplicate row', async () => {
     const context = await browser.newContext();
     const processName = '848427_business_vois_VCSPricing';

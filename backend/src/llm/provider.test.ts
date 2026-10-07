@@ -9,6 +9,17 @@ const response = (name = 'complete_task', args: unknown = { summary: 'Destinatio
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('Azure OpenAI provider', () => {
+  it('returns one validated multi-action plan and records compact input estimates', async () => {
+    const observed = { ...observation, interactiveElements: [{ elementId: 'el_real_transport', role: 'textbox', name: 'Name' }] };
+    const request = vi.fn().mockResolvedValue(response('execute_plan', { actions: [{ tool: 'focus', ref: 'e1' }, { tool: 'fill', ref: 'e1', arguments: { value: 'Alice' } }], verification: { kind: 'field_value', ref: 'e1', value: 'Alice' } }));
+    vi.stubGlobal('fetch', request); const metrics: any[] = [];
+    const decision = await new AzureOpenAIProvider(settings()).decide('Focus Name and fill it with Alice', observed, {}, undefined, undefined, record => metrics.push(record));
+    expect(decision).toMatchObject({ type: 'execution_plan', actions: [{ tool: 'focus', arguments: { elementId: 'el_real_transport' } }, { tool: 'fill', arguments: { value: 'Alice' } }] });
+    expect(metrics.at(-1)).toMatchObject({ outcome: 'succeeded', planSize: 2, source: 'model' });
+    expect(metrics.at(-1).estimatedInputTokens).toBeLessThanOrEqual(1500);
+    expect(JSON.stringify(JSON.parse(request.mock.calls[0]![1].body).messages)).not.toContain('el_real_transport');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
   it('shares simultaneous connection checks and records their success', async () => {
     let finish!: (response: Response) => void;
     const fetchMock = vi.fn().mockReturnValue(new Promise(resolve => { finish = resolve; }));

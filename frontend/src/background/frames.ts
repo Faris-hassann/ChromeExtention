@@ -58,6 +58,7 @@ export async function collectFrames(tabId: number, query?: TableSearch) {
     tables: readable.flatMap(entry => entry.result.tables), forms: readable.flatMap(entry => entry.result.forms),
     dialogs: readable.flatMap(entry => entry.result.dialogs), toasts: readable.flatMap(entry => entry.result.toasts),
     powerBi: main.result.powerBi ? { ...(readable.find(entry => entry.result.powerBi?.saveControlId)?.result.powerBi ?? main.result.powerBi), selectedVisualId: readable.find(entry => entry.result.powerBi?.selectedVisualId)?.result.powerBi?.selectedVisualId, saving: readable.some(entry => entry.result.powerBi?.saving), saveMessages: [...new Set(readable.flatMap(entry => [...entry.result.toasts, ...(entry.result.powerBi?.saveMessages ?? [])]))].filter(message => /sav(ed|ing|e)|couldn.t|failed|error/i.test(message)) } : undefined,
+    dashboardEvidence: { filters: readable.flatMap(entry => (entry.result.dashboardEvidence?.filters ?? []).map(filter => ({ ...filter, frameId: String(entry.frame.frameId) }))), visuals: readable.flatMap(entry => (entry.result.dashboardEvidence?.visuals ?? []).map(visual => ({ ...visual, frameId: String(entry.frame.frameId) }))) },
     frames: collected.map(entry => ({ frameId: String(entry.frame.frameId), parentFrameId: String(entry.frame.parentFrameId), url: entry.frame.url, documentId: entry.accessible ? entry.documentId : undefined, accessible: entry.accessible, ...(!entry.accessible ? { error: entry.error } : {}) })),
   };
 }

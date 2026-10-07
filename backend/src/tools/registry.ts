@@ -60,7 +60,7 @@ const descriptions: Partial<Record<ToolName, string>> = {
   list_tabs: 'List browser tabs.', open_tab: 'Open a browser tab.', close_tab: 'Close a browser tab.', switch_tab: 'Switch to a browser tab.', submit_form: 'Submit the form containing an observed element.'
 };
 
-function parametersFor(name: ToolName): Record<string, unknown> {
+export function parametersFor(name: ToolName): Record<string, unknown> {
   if (name === 'find_element') return { type: 'object', properties: { text: { type: 'string' }, column: { type: 'string' }, exact: { type: 'boolean' }, occurrence: { type: 'integer', minimum: 1, maximum: 100 } }, required: ['text'], additionalProperties: false };
   if (name === 'verify_report_change') return { type: 'object', properties: { elementId: { type: 'string' }, property: { type: 'string', enum: ['chartType', 'title', 'color'] }, expectedValue: { type: 'string' } }, required: ['elementId', 'property', 'expectedValue'], additionalProperties: false };
   if (name === 'wait_for_element') return { type: 'object', properties: { elementId: { type: 'string' }, timeoutMs: { type: 'number', minimum: 100, maximum: 5000 } }, additionalProperties: false };

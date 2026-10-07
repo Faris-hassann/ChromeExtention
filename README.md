@@ -69,3 +69,12 @@ To select the process shown in the Reusable Components Hub, enter:
 > Find 848427_business_vois_VCSPricing in the bottom table's Process Name column and click the first matching row.
 
 The agent searches rendered table cells by exact text and column heading, then clicks the matching cell. It does not use the global Power BI/Fabric search field for table rows. Matching cells are prioritized even if the page contains many navigation controls. If the value is not rendered yet, the agent can scroll the table pane and search again. When a name appears twice, the default is the first matching row; specify the month or row occurrence to distinguish duplicates. Row selection uses the reading view and does not require entering the report editor or saving the report.
+
+## Task usage metrics
+
+The panel displays per-request usage and task totals, with separate greeting-test metrics. Set the three optional Azure USD prices per million tokens in backend/.env to enable estimated cost, then restart the backend, rebuild and reload the extension. Missing usage and prices remain unavailable; incomplete totals are marked Partial. Metrics last only for the backend session. See [usage configuration and calculation](backend/README.md#azure-usage-and-estimated-cost).
+
+Browser work now uses compact multi-action plans and local workflows where targets and outcomes are unambiguous. The panel shows model/local/recovery action counts and advisory budget warnings. Warnings continue execution; verification and automatic-step pauses remain in force. See [compact planning and the opt-in benchmark](backend/README.md#compact-planning-and-local-workflows).
+
+
+The task view shows a compact Azure connection indicator and the number of Azure requests sent. Open Settings for Azure testing and configuration status, or Diagnostics beside it for a readable event timeline. Completion, pauses, stops, errors and requests for user intervention automatically display a cost and metrics summary; resumed tasks keep the same cumulative totals. Restart the backend and rebuild/reload the extension after updating.
