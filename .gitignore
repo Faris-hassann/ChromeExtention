@@ -33,6 +33,7 @@ pnpm-debug.log*
 # Local environment and secrets (keep documented examples)
 .env
 .env.*
+/backend/.env
 !.env.example
 !**/.env.example
 
@@ -59,7 +60,4 @@ temp/
 *.tmp
 *.bak
 *.orig
-backend/.env
-backend/.env
 /backend
-backend/.env
