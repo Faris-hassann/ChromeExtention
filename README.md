@@ -3,7 +3,7 @@
 The repository root is the application workspace:
 
 - `frontend/` — React, TypeScript, Vite, Manifest V3 extension
-- `backend/` — Express, WebSocket, TypeScript, OpenRouter with Ollama/Qwen fallback
+- `backend/` — Express, WebSocket, TypeScript, Azure OpenAI
 - `contracts/` — shared reference contracts
 - `tests/` — product acceptance contracts
 - `BrowserAgent_Codex_Claude_Pack/` — architecture and behavior specifications
@@ -25,13 +25,22 @@ npm run dev:backend
 npm run dev:frontend
 ```
 
-Load `frontend/dist` as an unpacked extension from `chrome://extensions` or `edge://extensions`. Copy `backend/.env.example` to `backend/.env` and configure `OPENROUTER_API_KEY` there for free cloud decisions; without a key, decisions use Ollama immediately. Restart the backend after changing `.env`. Keep Ollama running at `http://127.0.0.1:11434` for local fallback; its default model is `qwen2.5:7b`.
+Load `frontend/dist` as an unpacked extension from `chrome://extensions` or `edge://extensions`. Copy `backend/.env.example` to `backend/.env` when setting up a new environment, then fill these exact variables using your existing Azure OpenAI resource and GPT-5.4 mini deployment:
 
-OpenRouter receives the task and compact page context when enabled. The key stays exclusively in the backend. See [backend configuration](backend/README.md).
+```dotenv
+Azure_openAi_Endpoint=https://YOUR-RESOURCE.openai.azure.com/
+Azure_openAI_API_KEY=YOUR-KEY
+Azure_openai_deployment_Name=YOUR-DEPLOYMENT-NAME
+azure_openai_API_version=YOUR-SUPPORTED-API-VERSION
+```
 
-The panel shows which provider is running, OpenRouter failures and HTTP status, why local Qwen was selected, elapsed time, action results and observed page changes. Diagnostics are visible by default and can be copied. OpenRouter availability shows key validity, daily free quota and the next retry time, with a Refresh OpenRouter status control. Exhausted account quota skips inference until the UTC daily reset or confirmed quota recovery; temporary provider failures use free-model routing and cooldowns. All cloud routes stay free-only. Local prompts are compact, and simple exact process-row clicks avoid extra model requests for clicking and completion. Default request deadlines are 20 seconds for OpenRouter, including availability and routing, and 90 seconds total for Qwen. CPU inference and free-provider availability still affect speed.
+Use the resource endpoint, not a complete chat-completions URL. The deployment name selects the deployed model; the application does not create a deployment or replace its name with a public model ID. Restart the backend after editing the environment. Azure OpenAI receives the task and compact page context; the key remains exclusively in the backend. See [backend configuration](backend/README.md).
 
-After a build, reload the unpacked extension, then reopen its side panel. The panel verifies its build version against the running background worker and blocks automation if they differ.
+The panel shows Azure configuration readiness, the last request outcome, elapsed request time, action results and observed page changes. Configuration readiness alone does not verify access; only a successful Azure request marks availability as verified. **Test Azure connection** sends one `hi` request and shows the model reply, updating the running backend status to available on success. Refresh Azure status reads the recorded status without sending another inference request. Missing configuration blocks task creation while backend health remains available. Requests have a 90-second timeout and a 4,096 completion-token budget by default. Azure errors stop the task without retries or provider fallback. Diagnostics remain available for copying.
+
+Completed tasks stop permanently; submit a new task to run again. The agent rejects duplicate action and observation events, and pauses after three repetitions of the same action on an unchanged page. The automatic-step limit also includes read-only tools. Resume starts a new bounded execution window after a fresh observation.
+
+Restart the backend and reload the extension together after this protocol update. After a build, reload the unpacked extension, then reopen its side panel. The panel verifies its build version against the running background worker and blocks automation if they differ.
 
 The extension now has permanent HTTP(S) host access and defaults to **Always allow actions**, including typing, clicks, navigation and form submission. Tasks do not require one-off approval clicks. Pause and Stop remain available. This means the extension can read and interact with every HTTP(S) website; only start tasks you trust. Settings can restore approval prompts. Chrome still protects internal browser pages, and any site restrictions you apply in Chrome remain effective. If host access is withheld, the recovery control preserves the task while access is resolved.
 
@@ -47,7 +56,7 @@ Open the report at `app.powerbi.com` while signed in with an account that can al
 
 > On the Overview page, change the Revenue chart to a bar chart, set its title to Revenue 2026, change its colour to #0000FF, and save the report.
 
-The agent reads visible report content and accessible frame content, uses the report editor, checks the requested title, colour and selected chart-type settings, then watches for save confirmation. The initial editing support covers these three formatting properties. It uses your current browser session; no Microsoft API credentials are required. Power BI Desktop, dashboard tile editing, DAX and model changes are outside this workflow.
+The agent reads visible report content and accessible frame content, uses the report editor, checks the requested title, colour and selected chart-type settings, then watches for save confirmation. The initial editing support covers these three formatting properties. It uses your current browser session; no separate Power BI API credentials are required. Azure OpenAI credentials are required for agent reasoning. Power BI Desktop, dashboard tile editing, DAX and model changes are outside this workflow.
 
 If the report editor does not expose a setting or save evidence, the task pauses with an explanation. Pause, Stop and Take control remain available, and the existing approval setting applies to editing actions. Reload the report after a first test edit to check that the changes persist. Never interpret a successful click alone as a verified save.
 

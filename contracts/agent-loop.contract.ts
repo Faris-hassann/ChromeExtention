@@ -29,7 +29,8 @@ export type AgentDecision =
 
 /**
  * Runtime invariant:
- * after a meaningful tool call, a new BrowserObservation must be received and
- * consumed before another meaningful tool call can be dispatched.
+ * Only one decision or browser action may be active per task. After a tool call,
+ * its matching result and a requested fresh BrowserObservation must be consumed
+ * before another tool call can be dispatched. Terminal tasks cannot restart.
  */
 export const OBSERVATION_AFTER_ACTION_INVARIANT = true as const;

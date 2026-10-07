@@ -1,3 +1,7 @@
+## Historical specification
+
+This pack records the original local-provider design. The current application uses Azure OpenAI exclusively; provider setup and behavior are documented in [the application README](../README.md) and [backend README](../backend/README.md).
+
 # Local Browser Agent — Codex / Claude Build Pack
 
 This ZIP is an implementation contract for building a local browser AI agent for **Google Chrome and Microsoft Edge**.

@@ -1,122 +1,138 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FallbackProvider, OpenRouterProvider } from './provider.js';
-import { decisionContext } from './ollama.js';
-import { sanitizeLogData } from '../logger.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AzureOpenAIProvider, azureConfiguration, type AzureSettings } from './provider.js';
 import type { BrowserObservation } from '../types.js';
-import type { ProviderProgress } from './progress.js';
-import { config } from '../config.js';
-import { OpenRouterStatusService } from './openrouter-status.js';
+import { sanitizeLogData } from '../logger.js';
 
-const observation: BrowserObservation = { observationId: 'o', taskId: 't', timestamp: '', tabId: '1', url: 'https://google.com/', title: 'Google', loadingState: 'complete', interactiveElements: [] };
-const decision = { type: 'tool_request' as const, tool: 'navigate' as const, arguments: { url: 'https://chatgpt.com/' } };
-const goodResponse = () => new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { name: 'navigate', arguments: JSON.stringify(decision.arguments) } }] } }], model: 'test:free' }));
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
-beforeEach(() => {
-  vi.spyOn(OpenRouterStatusService.prototype, 'status').mockImplementation(async function(this: any) { return this.effective({ configured: true, credentialValidity: 'valid', availability: 'unknown', reason: 'Quota unknown', checkedAt: new Date().toISOString() }); });
-  vi.spyOn(OpenRouterStatusService.prototype, 'models').mockResolvedValue([]);
-});
+const settings = (): AzureSettings => ({ azureEndpoint: 'https://example.openai.azure.com///', azureApiKey: 'secret-azure-key', azureDeployment: 'my deployment/mini', azureApiVersion: '2025-04-01-preview', azureTimeoutMs: 90000, azureMaxTokens: 4096 });
+const observation: BrowserObservation = { observationId: 'o', taskId: 'task', timestamp: '', tabId: '1', url: 'https://example.com/', title: 'Example', loadingState: 'complete', interactiveElements: [] };
+const response = (name = 'complete_task', args: unknown = { summary: 'Destination verified.' }, finishReason = 'tool_calls') => new Response(JSON.stringify({ model: 'gpt-5.4-mini', choices: [{ finish_reason: finishReason, message: { tool_calls: [{ function: { name, arguments: JSON.stringify(args) } }] } }] }), { status: 200 });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-describe('OpenRouter and fallback', () => {
-  it.each(['openai/gpt-4o', 'openrouter/auto', 'openrouter/auto:free'])('rejects paid or billing-router configuration %s before any requests', async model => {
-    vi.stubGlobal('fetch', vi.fn());
-    await expect(new OpenRouterProvider('key', model).decide('Read', observation, {})).rejects.toThrow('disabled');
-    expect(fetch).not.toHaveBeenCalled();
-  });
-  it('reports the actual successful OpenRouter model and never calls local fallback', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(goodResponse()));
-    const local = { decide: vi.fn() }; const events: ProviderProgress[] = [];
-    await new FallbackProvider(new OpenRouterProvider('secret-key'), local).decide('open ChatGPT', observation, {}, undefined, event => events.push(event));
-    expect(events.map(event => event.phase)).toEqual(['started', 'model_selected', 'succeeded']);
-    expect(events.at(-1)).toMatchObject({ provider: 'openrouter', model: 'test:free' });
-    expect(JSON.stringify(events)).not.toContain('secret-key'); expect(local.decide).not.toHaveBeenCalled();
-    const body = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string);
-    expect(body.max_tokens).toBe(config.openrouterMaxTokens);
-    expect(body.provider.sort).toBe('latency');
-  });
-  it('reports rate limiting and cooldown, then retries OpenRouter when the cooldown ends', async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('sensitive response', { status: 429, headers: { 'retry-after': '2' } })).mockResolvedValue(goodResponse());
+describe('Azure OpenAI provider', () => {
+  it('shares simultaneous connection checks and records their success', async () => {
+    let finish!: (response: Response) => void;
+    const fetchMock = vi.fn().mockReturnValue(new Promise(resolve => { finish = resolve; }));
     vi.stubGlobal('fetch', fetchMock);
-    const local = { decide: vi.fn().mockResolvedValue(decision) }; const events: ProviderProgress[] = [];
-    const provider = new FallbackProvider(new OpenRouterProvider('secret-key'), local);
-    const report = (event: ProviderProgress) => events.push(event);
-    await provider.decide('open ChatGPT', observation, {}, undefined, report);
-    expect(events.map(event => event.phase)).toEqual(['started', 'failed', 'fallback', 'started', 'succeeded']);
-    expect(events[1]).toMatchObject({ status: 429, code: 'RATE_LIMIT' });
-    expect(events[1]!.message).toContain('Rate limit');
-    await provider.decide('open ChatGPT', observation, {}, undefined, report);
-    expect(fetchMock).toHaveBeenCalledTimes(1); expect(events.some(event => /Rate limit/.test(event.message))).toBe(true);
-    await vi.advanceTimersByTimeAsync(2100);
-    await provider.decide('open ChatGPT', observation, {}, undefined, report);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(events)).not.toContain('sensitive response'); expect(JSON.stringify(events)).not.toContain('secret-key');
+    const provider = new AzureOpenAIProvider(settings());
+    const first = provider.testAccess(); const second = provider.testAccess();
+    expect(first).toBe(second);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    finish(new Response(JSON.stringify({ choices: [{ message: { content: 'Hi!' }, finish_reason: 'stop' }] })));
+    expect(await first).toMatchObject({ text: 'Hi!' }); await second;
+    expect(provider.status()).toMatchObject({ availability: 'available', lastRequest: { outcome: 'succeeded' } });
   });
-  it('makes missing credentials visible and reports both providers failing', async () => {
-    const events: ProviderProgress[] = [];
-    const local = { decide: vi.fn().mockRejectedValue(new Error('Ollama offline')) };
-    await expect(new FallbackProvider(null, local).decide('open ChatGPT', observation, {}, undefined, event => events.push(event))).rejects.toThrow('offline');
-    expect(events[0]).toMatchObject({ phase: 'skipped' });
-    expect(events.at(-1)).toMatchObject({ provider: 'ollama', phase: 'failed' });
+  it('uses the configured deployment URL, encoded API version and API key without model substitution', async () => {
+    const options = settings(); options.azureApiVersion = '2025-04-01-preview&extra=x';
+    const fetchMock = vi.fn().mockResolvedValue(response()); vi.stubGlobal('fetch', fetchMock);
+    const provider = new AzureOpenAIProvider(options); const events: any[] = [];
+    expect(provider.status()).toMatchObject({ configured: true, availability: 'unverified' });
+    expect(await provider.decide('Open example.com', observation, {}, undefined, event => events.push(event))).toEqual({ type: 'complete_request', summary: 'Destination verified.' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, request] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://example.openai.azure.com/openai/deployments/my%20deployment%2Fmini/chat/completions?api-version=2025-04-01-preview%26extra%3Dx');
+    expect(request.headers).toEqual({ 'api-key': 'secret-azure-key', 'content-type': 'application/json' });
+    expect(request.redirect).toBe('error');
+    const body = JSON.parse(request.body);
+    expect(body).toMatchObject({ tool_choice: 'required', parallel_tool_calls: false, max_completion_tokens: 4096, stream: false });
+    expect(body.messages).toHaveLength(2); expect(body.tools.length).toBeGreaterThan(0);
+    for (const field of ['model', 'models', 'temperature', 'max_tokens', 'provider']) expect(body).not.toHaveProperty(field);
+    expect(events.map(event => event.phase)).toEqual(['started', 'succeeded']);
+    expect(events.every(event => event.provider === 'azure' && event.model === options.azureDeployment)).toBe(true);
+    expect(provider.status()).toMatchObject({ availability: 'available', lastRequest: { outcome: 'succeeded' } });
+    expect(JSON.stringify(provider.status())).not.toContain(options.azureApiKey);
   });
-  it('sends elapsed waiting updates and removes the timer when finished', async () => {
-    vi.useFakeTimers(); let finish!: (decision: any) => void;
-    const primary = { decide: vi.fn(() => new Promise<any>(resolve => { finish = resolve; })) };
-    const events: ProviderProgress[] = [];
-    const pending = new FallbackProvider(primary).decide('open ChatGPT', observation, {}, undefined, event => events.push(event));
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(events.at(-1)).toMatchObject({ phase: 'waiting', elapsedMs: 5000 });
-    finish(decision); await pending;
-    const count = events.length; await vi.advanceTimersByTimeAsync(10000);
-    expect(events).toHaveLength(count);
+
+  it.each([
+    ['azureEndpoint', 'Azure_openAi_Endpoint'], ['azureApiKey', 'Azure_openAI_API_KEY'],
+    ['azureDeployment', 'Azure_openai_deployment_Name'], ['azureApiVersion', 'azure_openai_API_version'],
+  ] as const)('identifies missing %s and sends no requests', async (key, name) => {
+    const options = settings(); options[key] = '';
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    expect(azureConfiguration(options)).toMatchObject({ configured: false, missing: [name] });
+    const provider = new AzureOpenAIProvider(options);
+    expect(provider.status().availability).toBe('unconfigured');
+    await expect(provider.decide('Open example.com', observation, {})).rejects.toMatchObject({ code: 'CONFIGURATION' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
-  it('requests a free model with native tools and validates its decision', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(goodResponse()); vi.stubGlobal('fetch', fetchMock);
-    expect(await new OpenRouterProvider('secret-key').decide('open ChatGPT', observation, {})).toMatchObject(decision);
-    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
-    expect(body.model).toBe('openrouter/free'); expect(body.tool_choice).toBe('required');
-    expect(body.models).toEqual(['openrouter/free']);
-    expect(body.provider.require_parameters).toBe(true);
-    expect(body.reasoning).toBeUndefined(); expect(body.parallel_tool_calls).toBeUndefined();
-    expect(body.tools.some((t: any) => t.function.name === 'navigate')).toBe(true);
+
+  it.each(['http://example.com', 'https://user:password@example.com', 'https://example.com/?key=secret', 'not-a-url'])('rejects invalid endpoint %s without displaying its value', async endpoint => {
+    const options = settings(); options.azureEndpoint = endpoint;
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const provider = new AzureOpenAIProvider(options);
+    await expect(provider.decide('Open example.com', observation, {})).rejects.toMatchObject({ code: 'CONFIGURATION' });
+    expect(provider.status().reason).not.toContain(endpoint);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
-  it('uses local decisions directly without a key', async () => {
-    const local = { decide: vi.fn().mockResolvedValue(decision) };
-    expect(await new FallbackProvider(null, local).decide('open ChatGPT', observation, {})).toBe(decision);
-    expect(local.decide).toHaveBeenCalledTimes(1);
+
+  it.each([
+    [401, 'Unauthorized', 'AUTHENTICATION'], [403, 'Forbidden', 'ACCESS_DENIED'],
+    [404, 'DeploymentNotFound', 'DEPLOYMENT_NOT_FOUND'], [400, 'InvalidApiVersionParameter', 'API_VERSION'],
+    [429, 'TooManyRequests', 'RATE_LIMIT'], [400, 'BadRequest', 'INVALID_REQUEST'],
+    [400, 'content_filter', 'CONTENT_FILTER'], [503, 'Unavailable', 'HTTP_ERROR'],
+  ])('classifies HTTP %s / %s safely and makes no retry or fallback', async (status, upstreamCode, code) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: upstreamCode, message: 'secret-azure-key upstream body' } }), { status: status as number }));
+    vi.stubGlobal('fetch', fetchMock); const logs = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const provider = new AzureOpenAIProvider(settings()); const events: any[] = [];
+    await expect(provider.decide('Open example.com', observation, {}, undefined, event => events.push(event))).rejects.toMatchObject({ code, status });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(events.map(event => event.phase)).toEqual(['started', 'failed']);
+    expect(provider.status()).toMatchObject({ availability: 'unavailable', lastRequest: { outcome: 'failed', code } });
+    expect(JSON.stringify([provider.status(), events, logs.mock.calls])).not.toContain('secret-azure-key');
   });
-  it.each([401, 429, 503])('falls back once on HTTP %s with identical task memory', async status => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('private upstream body', { status })));
-    const local = { decide: vi.fn().mockResolvedValue(decision) }; const memory = { textSlots: { answer: 'verbatim private answer' } };
-    expect(await new FallbackProvider(new OpenRouterProvider('key'), local).decide('open ChatGPT', observation, memory)).toBe(decision);
-    expect(local.decide).toHaveBeenCalledExactlyOnceWith('open ChatGPT', observation, memory, undefined);
+
+  it.each(['length', 'content_filter'])('rejects %s finishes without acting', async finishReason => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response('complete_task', { summary: 'Done' }, finishReason)));
+    await expect(new AzureOpenAIProvider(settings()).decide('Open example.com', observation, {})).rejects.toMatchObject({ code: finishReason === 'length' ? 'OUTPUT_LIMIT' : 'CONTENT_FILTER' });
   });
-  it('falls back on malformed or absent tool calls', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'invalid secret' } }] }))));
-    const local = { decide: vi.fn().mockResolvedValue(decision) };
-    await new FallbackProvider(new OpenRouterProvider('key'), local).decide('open ChatGPT', observation, {});
-    expect(local.decide).toHaveBeenCalledTimes(1);
+
+  it.each([
+    { choices: [{ message: { tool_calls: [] } }] },
+    { choices: [{ message: { tool_calls: [{ function: { name: 'navigate', arguments: '{}' } }, { function: { name: 'complete_task', arguments: '{"summary":"Done"}' } }] } }] },
+    { choices: [{ message: { tool_calls: [{ function: { name: 'unknown_tool', arguments: '{}' } }] } }] },
+    { choices: [{ message: { tool_calls: [{ function: { name: 'navigate', arguments: '{"url":"not-a-url"}' } }] } }] },
+    { choices: [{ message: { tool_calls: [{ function: { name: 'complete_task', arguments: 'secret-azure-key malformed' } }] } }] },
+  ])('rejects malformed or unavailable tool decisions without retry', async body => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(body))); vi.stubGlobal('fetch', fetchMock);
+    await expect(new AzureOpenAIProvider(settings()).decide('Open example.com', observation, {})).rejects.toMatchObject({ code: 'INVALID_DECISION' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-  it('times out and uses the local model', async () => {
-    vi.stubGlobal('fetch', vi.fn((_url, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('timeout'))))));
-    const local = { decide: vi.fn().mockResolvedValue(decision) };
-    await new FallbackProvider(new OpenRouterProvider('key', 'openrouter/free', 10), local).decide('open ChatGPT', observation, {});
-    expect(local.decide).toHaveBeenCalledTimes(1);
+
+  it('handles non-JSON responses and sanitizes network exceptions', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('secret-azure-key')).mockRejectedValueOnce(new Error('request https://secret-azure-key@example.com')));
+    const provider = new AzureOpenAIProvider(settings());
+    await expect(provider.decide('Open example.com', observation, {})).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    await expect(provider.decide('Open example.com', observation, {})).rejects.toMatchObject({ code: 'NETWORK_ERROR', message: 'Azure could not be reached. Check the endpoint and network access.' });
+    expect(JSON.stringify(provider.status())).not.toContain('secret-azure-key');
   });
-  it('never starts local fallback after user cancellation', async () => {
-    const controller = new AbortController();
-    const primary = { decide: vi.fn(async () => { controller.abort(); throw new DOMException('cancelled', 'AbortError'); }) };
-    const local = { decide: vi.fn() };
-    await expect(new FallbackProvider(primary, local).decide('open ChatGPT', observation, {}, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(local.decide).not.toHaveBeenCalled();
+
+  it('times out a stalled request and clears waiting timers', async () => {
+    vi.useFakeTimers(); const options = settings(); options.azureTimeoutMs = 10000;
+    const fetchMock = vi.fn((_url, init: RequestInit) => new Promise((_resolve, reject) => init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })));
+    vi.stubGlobal('fetch', fetchMock); const provider = new AzureOpenAIProvider(options); const events: any[] = [];
+    const pending = provider.decide('Open example.com', observation, {}, undefined, event => events.push(event));
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(10000); await assertion;
+    expect(events.some(event => event.phase === 'waiting')).toBe(true);
+    expect(vi.getTimerCount()).toBe(0); expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-  it('reports both provider failures', async () => {
-    const primary = { decide: vi.fn().mockRejectedValue(new Error('OpenRouter HTTP 429')) };
-    const local = { decide: vi.fn().mockRejectedValue(new Error('Ollama offline')) };
-    await expect(new FallbackProvider(primary, local).decide('open ChatGPT', observation, {})).rejects.toThrow('OpenRouter HTTP 429; local fallback failed: Ollama offline');
+
+  it('honours cancellation before requests and discards late successful responses', async () => {
+    const before = new AbortController(); before.abort();
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const provider = new AzureOpenAIProvider(settings());
+    await expect(provider.decide('Open example.com', observation, {}, before.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    let finish!: (value: Response) => void;
+    fetchMock.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const controller = new AbortController(); const events: any[] = [];
+    const pending = provider.decide('Open example.com', observation, {}, controller.signal, event => events.push(event));
+    const assertion = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort(); finish(response()); await assertion;
+    expect(events.map(event => event.phase)).toEqual(['started']);
+    expect(provider.status()).toMatchObject({ availability: 'unverified', lastRequest: { outcome: 'cancelled' } });
   });
-  it('redacts secrets and never includes saved answer contents in model memory', () => {
-    const secret = 'never-log-this';
-    expect(JSON.stringify(sanitizeLogData({ apiKey: secret, capturedText: secret, value: secret, prompt: secret }))).not.toContain(secret);
-    expect(JSON.stringify(decisionContext('paste answer', observation, { textSlots: { answer: secret } }))).not.toContain(secret);
+
+  it('redacts Azure key names and headers in diagnostics', () => {
+    expect(sanitizeLogData({ Azure_openAI_API_KEY: 'secret', azureApiKey: 'secret', headers: { 'api-key': 'secret' } })).toEqual({ Azure_openAI_API_KEY: '[REDACTED]', azureApiKey: '[REDACTED]', headers: { 'api-key': '[REDACTED]' } });
   });
 });

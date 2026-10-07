@@ -5,7 +5,7 @@ import { config } from './config.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const weights: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
-const sensitiveKey = /password|token|secret|cookie|authorization|apiKey|capturedText|pageText|prompt|content|semanticContent|screenshotRef|value|^title$|^text$|^summary$|^question$/i;
+const sensitiveKey = /password|token|secret|cookie|authorization|api[-_]?key|capturedText|pageText|prompt|content|semanticContent|screenshotRef|value|^title$|^text$|^summary$|^question$/i;
 
 function diagnosticField(key: string, value: unknown, depth: number): unknown {
   if (/^(promptEvalCount|promptEvalCachedCount|promptEvalDurationMs)$/.test(key) && typeof value === 'number') return value;

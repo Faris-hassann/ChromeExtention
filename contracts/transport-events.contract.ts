@@ -15,6 +15,8 @@ export interface Envelope<T = unknown> {
   taskId?: string;
   stepId?: string;
   toolCallId?: string;
+  /** Required for observe_page requests and their client.observation responses. */
+  requestId?: string;
   observationId?: string;
   tabId?: string;
   payload: T;

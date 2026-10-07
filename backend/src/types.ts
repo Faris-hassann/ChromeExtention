@@ -8,5 +8,5 @@ export interface BrowserObservation { observationId: string; taskId: string; tim
 export interface ToolDefinition { name: ToolName; risk: RiskLevel; capability: Capability; meaningful: boolean }
 export interface ToolRequest { taskId: string; stepId: string; toolCallId: string; tool: ToolName; arguments: Record<string, unknown> }
 export type AgentDecision = { type: 'tool_request'; tool: ToolName; arguments: Record<string, unknown>; userFacingActivity?: string } | { type: 'complete_request'; summary?: string } | { type: 'user_input_required'; question: string };
-export interface Envelope<T = unknown> { event: string; taskId?: string; stepId?: string; toolCallId?: string; observationId?: string; tabId?: string; payload: T }
+export interface Envelope<T = unknown> { event: string; taskId?: string; stepId?: string; toolCallId?: string; requestId?: string; observationId?: string; tabId?: string; payload: T }
 export interface PermissionRule { id: string; scope: string; capabilities: Capability[]; duration: 'once' | 'session' | 'persistent'; effect: 'allow' | 'block' }
